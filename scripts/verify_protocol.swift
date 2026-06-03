@@ -39,7 +39,8 @@ func runProtocolVerifier() throws {
   expectEqual(status.data?.capabilities, [
     "screenshot.full",
     "screenshot.window",
-    "screenshot.region"
+    "screenshot.region",
+    "screenshot.cursor"
   ], "capabilities")
 
   let capture: Envelope<ScreenshotCapturePayload> = try send(

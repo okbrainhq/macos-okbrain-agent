@@ -12,17 +12,18 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
       throw AgentProtocolError.unsupportedFormat("Only PNG screenshot responses are currently supported")
     }
 
-    if params.includeCursor == true {
-      throw AgentProtocolError.unsupportedParameter("includeCursor is not supported yet")
-    }
+    let includeCursor = params.includeCursor ?? false
 
     let image: CGImage
     switch (params.mode ?? "full").lowercased() {
     case "full":
-      image = try captureFullScreen()
+      image = try captureFullScreen(includeCursor: includeCursor)
     case "window":
-      image = try captureWindow(params)
+      image = try captureWindow(params, includeCursor: includeCursor)
     case "region":
+      if includeCursor {
+        throw AgentProtocolError.unsupportedParameter("includeCursor is not supported for region screenshots")
+      }
       image = try captureRegion(params)
     case let mode:
       throw AgentProtocolError.unsupportedMode("Unsupported screenshot mode: \(mode)")
@@ -35,7 +36,7 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
     return CapturedImage(pngData: pngData, width: image.width, height: image.height)
   }
 
-  private func captureFullScreen() throws -> CGImage {
+  private func captureFullScreen(includeCursor: Bool) throws -> CGImage {
     let content = try shareableContent()
     let display = content.displays.first { $0.displayID == CGMainDisplayID() } ?? content.displays.first
     guard let display else {
@@ -50,13 +51,13 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
     let configuration = streamConfiguration(
       width: CGDisplayPixelsWide(display.displayID),
       height: CGDisplayPixelsHigh(display.displayID),
-      includeCursor: false
+      includeCursor: includeCursor
     )
 
     return try captureImage(filter: filter, configuration: configuration)
   }
 
-  private func captureWindow(_ params: AgentRequestParams) throws -> CGImage {
+  private func captureWindow(_ params: AgentRequestParams, includeCursor: Bool) throws -> CGImage {
     let content = try shareableContent()
     let window: SCWindow
     if let requestedWindowID = params.windowId {
@@ -75,7 +76,7 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
     let configuration = streamConfiguration(
       width: Int(max(1, window.frame.width * scale)),
       height: Int(max(1, window.frame.height * scale)),
-      includeCursor: false
+      includeCursor: includeCursor
     )
     configuration.ignoreShadowsSingleWindow = true
     configuration.ignoreGlobalClipSingleWindow = true

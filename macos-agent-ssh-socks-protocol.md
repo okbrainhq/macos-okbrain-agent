@@ -138,7 +138,7 @@ Expected `data`:
     "screenRecording": "granted",
     "accessibility": "unknown"
   },
-  "capabilities": ["screenshot.full", "screenshot.window", "screenshot.region"]
+  "capabilities": ["screenshot.full", "screenshot.window", "screenshot.region", "screenshot.cursor"]
 }
 ```
 
@@ -174,9 +174,9 @@ Modes:
 
 | Mode | Required params | Notes |
 | --- | --- | --- |
-| `full` | none | All displays or primary display, based on app settings |
-| `window` | `appName` or `windowId` | Future: list windows first |
-| `region` | `rect: { x, y, width, height }` | Screen coordinates |
+| `full` | none | Primary display; set `includeCursor: true` to include the pointer |
+| `window` | `appName` or `windowId` | Set `includeCursor: true` to include the pointer if it is within the capture |
+| `region` | `rect: { x, y, width, height }` | Screen coordinates; `includeCursor` is not supported |
 
 ### `permissions.status`
 

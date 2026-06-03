@@ -137,7 +137,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
       capabilities: [
         "screenshot.full",
         "screenshot.window",
-        "screenshot.region"
+        "screenshot.region",
+        "screenshot.cursor"
       ]
     )
   }
