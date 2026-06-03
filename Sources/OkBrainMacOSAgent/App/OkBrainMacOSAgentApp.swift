@@ -29,7 +29,7 @@ struct OkBrainMacOSAgentApp: App {
     }
     .defaultSize(width: 920, height: 620)
 
-    MenuBarExtra("OkBrain Agent", systemImage: "camera.viewfinder") {
+    MenuBarExtra("OkBrain Agent", systemImage: "brain.head.profile") {
       MenuBarView()
         .environmentObject(AgentRuntimeStore.shared)
     }
