@@ -63,4 +63,12 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-echo "Built $APP_BUNDLE"
+# Sign the app if the local dev certificate exists
+# Using SHA-1 hash to avoid ambiguity when multiple certs share the same name
+CODESIGN_HASH="21609ACF2FF1CBB60C9669EC01CB52D01FEBAF47"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CODESIGN_HASH"; then
+    codesign --force --deep --sign "$CODESIGN_HASH" "$APP_BUNDLE"
+    echo "Signed $APP_BUNDLE with OkBrain Dev"
+else
+    echo "Built $APP_BUNDLE (unsigned — run scripts/setup-codesign.sh to enable persistent permissions)"
+fi

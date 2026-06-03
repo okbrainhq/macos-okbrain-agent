@@ -3,6 +3,7 @@ import Foundation
 enum AppSection: String, CaseIterable, Hashable, Identifiable {
   case overview
   case screenshot
+  case settings
   case diagnostics
 
   var id: String {
@@ -15,6 +16,8 @@ enum AppSection: String, CaseIterable, Hashable, Identifiable {
       "Agent"
     case .screenshot:
       "Screenshot"
+    case .settings:
+      "Settings"
     case .diagnostics:
       "Diagnostics"
     }
@@ -26,6 +29,8 @@ enum AppSection: String, CaseIterable, Hashable, Identifiable {
       "antenna.radiowaves.left.and.right"
     case .screenshot:
       "camera.viewfinder"
+    case .settings:
+      "gearshape"
     case .diagnostics:
       "stethoscope"
     }

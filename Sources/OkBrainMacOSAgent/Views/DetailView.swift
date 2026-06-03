@@ -22,6 +22,8 @@ struct DetailView: View {
         OverviewView()
       case .screenshot:
         ScreenshotView()
+      case .settings:
+        SettingsView()
       case .diagnostics:
         DiagnosticsView()
       }

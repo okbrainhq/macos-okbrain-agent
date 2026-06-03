@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSApp.setActivationPolicy(.regular)
     NSApp.activate(ignoringOtherApps: true)
     AgentRuntimeStore.shared.start()
+    // Build verification: codesign test
   }
 
   func applicationWillTerminate(_ notification: Notification) {
