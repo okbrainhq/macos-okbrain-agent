@@ -15,9 +15,9 @@ struct SettingsView: View {
               )
             ) {
               VStack(alignment: .leading, spacing: 4) {
-                Text("Prevent Idle System Sleep")
+                Text("Prevent Idle Sleep")
                   .font(.headline)
-                Text("Keeps the agent awake for socket requests and screenshots. The display may still turn off.")
+                Text("Uses a per-process macOS activity assertion so remote screenshots stay available without sudo.")
                   .font(.callout)
                   .foregroundStyle(.secondary)
               }
@@ -43,9 +43,9 @@ struct SettingsView: View {
             }
 
             GridRow {
-              Text("Assertion")
+              Text("Activity")
                 .foregroundStyle(.secondary)
-              Text(assertionText)
+              Text(activityText)
                 .font(.callout.monospaced())
                 .textSelection(.enabled)
             }
@@ -53,7 +53,7 @@ struct SettingsView: View {
             GridRow {
               Text("Behavior")
                 .foregroundStyle(.secondary)
-              Text("Prevents idle system sleep only; does not force the display to stay on.")
+              Text("Prevents idle display/system sleep while the agent is active; no global pmset settings are changed.")
             }
           }
 
@@ -70,12 +70,8 @@ struct SettingsView: View {
     .frame(maxWidth: .infinity, alignment: .topLeading)
   }
 
-  private var assertionText: String {
-    guard let assertionID = store.idleSleepPrevention.assertionID else {
-      return "None"
-    }
-
-    return String(assertionID)
+  private var activityText: String {
+    store.idleSleepPrevention.activityDescription ?? "None"
   }
 }
 

@@ -1,50 +1,35 @@
 import Foundation
-import IOKit.pwr_mgt
-
-struct IdleSleepAssertionError: LocalizedError, Equatable {
-  let result: IOReturn
-
-  var errorDescription: String? {
-    "Unable to prevent idle system sleep. IOKit returned \(result)."
-  }
-}
 
 final class IdleSleepPreventer {
-  private var assertionID = IOPMAssertionID(0)
+  private static let activitySummary = "ProcessInfo activity: userInitiated + idleSystemSleepDisabled + idleDisplaySleepDisabled"
 
-  var currentAssertionID: UInt32? {
-    assertionID == 0 ? nil : UInt32(assertionID)
+  private var activity: NSObjectProtocol?
+
+  var currentSummary: String? {
+    activity == nil ? nil : Self.activitySummary
   }
 
   @discardableResult
-  func start(reason: String) throws -> UInt32 {
-    if let currentAssertionID {
-      return currentAssertionID
+  func start(reason: String) -> String {
+    if activity != nil {
+      return Self.activitySummary
     }
 
-    var newAssertionID = IOPMAssertionID(0)
-    let result = IOPMAssertionCreateWithName(
-      kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
-      IOPMAssertionLevel(kIOPMAssertionLevelOn),
-      reason as CFString,
-      &newAssertionID
+    activity = ProcessInfo.processInfo.beginActivity(
+      options: [.userInitiated, .idleSystemSleepDisabled, .idleDisplaySleepDisabled],
+      reason: reason
     )
 
-    guard result == kIOReturnSuccess else {
-      throw IdleSleepAssertionError(result: result)
-    }
-
-    assertionID = newAssertionID
-    return UInt32(newAssertionID)
+    return Self.activitySummary
   }
 
   func stop() {
-    guard assertionID != 0 else {
+    guard let activity else {
       return
     }
 
-    IOPMAssertionRelease(assertionID)
-    assertionID = 0
+    ProcessInfo.processInfo.endActivity(activity)
+    self.activity = nil
   }
 
   deinit {

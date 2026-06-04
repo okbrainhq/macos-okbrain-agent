@@ -19,7 +19,7 @@ struct IdleSleepPreventionSnapshot: Equatable {
   }
 
   let state: State
-  let assertionID: UInt32?
+  let activityDescription: String?
   let errorMessage: String?
 }
 
@@ -64,7 +64,7 @@ final class AgentRuntimeStore: ObservableObject {
     self.preventIdleSleepEnabled = preventIdleSleepEnabled
     idleSleepPrevention = IdleSleepPreventionSnapshot(
       state: preventIdleSleepEnabled ? .inactive : .disabled,
-      assertionID: nil,
+      activityDescription: nil,
       errorMessage: nil
     )
     permissions = permissionService.currentPermissions()
@@ -186,30 +186,22 @@ final class AgentRuntimeStore: ObservableObject {
   private func applyIdleSleepPreventionSetting() {
     guard preventIdleSleepEnabled else {
       idleSleepPreventer.stop()
-      idleSleepPrevention = IdleSleepPreventionSnapshot(state: .disabled, assertionID: nil, errorMessage: nil)
+      idleSleepPrevention = IdleSleepPreventionSnapshot(state: .disabled, activityDescription: nil, errorMessage: nil)
       return
     }
 
     guard isAgentRuntimeActive else {
       idleSleepPreventer.stop()
-      idleSleepPrevention = IdleSleepPreventionSnapshot(state: .inactive, assertionID: nil, errorMessage: nil)
+      idleSleepPrevention = IdleSleepPreventionSnapshot(state: .inactive, activityDescription: nil, errorMessage: nil)
       return
     }
 
-    do {
-      let assertionID = try idleSleepPreventer.start(reason: Self.preventIdleSleepReason)
-      idleSleepPrevention = IdleSleepPreventionSnapshot(
-        state: .active,
-        assertionID: assertionID,
-        errorMessage: nil
-      )
-    } catch {
-      idleSleepPrevention = IdleSleepPreventionSnapshot(
-        state: .failed,
-        assertionID: nil,
-        errorMessage: error.localizedDescription
-      )
-    }
+    let activityDescription = idleSleepPreventer.start(reason: Self.preventIdleSleepReason)
+    idleSleepPrevention = IdleSleepPreventionSnapshot(
+      state: .active,
+      activityDescription: activityDescription,
+      errorMessage: nil
+    )
   }
 
   private static func preview(from responseData: Data) -> ScreenshotPreview? {

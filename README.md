@@ -34,7 +34,7 @@ Output: `dist/OkBrainMacOSAgent.app`
 ./scripts/run.sh
 ```
 
-The agent starts a Unix socket at `/tmp/okbrain-macos-agent.sock` and listens for JSON requests.
+The agent starts a Unix socket at `/tmp/okbrain-macos-agent.sock` and listens for JSON requests. By default, it starts a per-process `ProcessInfo` activity with idle display/system sleep disabled while the agent is active, so remote screenshots stay available without changing global `pmset` settings or requiring sudo.
 
 ## Permissions
 
