@@ -63,12 +63,21 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-# Sign the app if the local dev certificate exists
-# Using SHA-1 hash to avoid ambiguity when multiple certs share the same name
+# Sign the app if the local dev certificate exists.
+# Using SHA-1 hash to avoid ambiguity when multiple certs share the same name.
 CODESIGN_HASH="21609ACF2FF1CBB60C9669EC01CB52D01FEBAF47"
+OKBRAIN_KEYCHAIN="$HOME/Library/Keychains/okbrain.keychain-db"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CODESIGN_HASH"; then
-    codesign --force --deep --sign "$CODESIGN_HASH" "$APP_BUNDLE"
-    echo "Signed $APP_BUNDLE with OkBrain Dev"
+    if [ -f "$OKBRAIN_KEYCHAIN" ]; then
+        security unlock-keychain -p okbrain "$OKBRAIN_KEYCHAIN" 2>/dev/null || true
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -k okbrain "$OKBRAIN_KEYCHAIN" >/dev/null 2>&1 || true
+    fi
+
+    if codesign --force --deep --sign "$CODESIGN_HASH" "$APP_BUNDLE"; then
+        echo "Signed $APP_BUNDLE with OkBrain Dev"
+    else
+        echo "Built $APP_BUNDLE (unsigned — codesign could not access OkBrain Dev; run scripts/setup-codesign.sh)"
+    fi
 else
     echo "Built $APP_BUNDLE (unsigned — run scripts/setup-codesign.sh to enable persistent permissions)"
 fi

@@ -396,7 +396,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
 
   private func allowedRoot(for rawRoot: String?, requireExisting: Bool) throws -> RootContext {
     guard configuration.enabled else {
-      throw AgentProtocolError.rootNotAllowed("File editing is disabled or no roots are approved")
+      throw AgentProtocolError.rootNotAllowed("File editing is disabled")
     }
     guard let rawRoot = rawRoot?.trimmingCharacters(in: .whitespacesAndNewlines), !rawRoot.isEmpty else {
       throw AgentProtocolError.rootRequired("File actions require root")
@@ -408,18 +408,11 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     let requestedCanonical = canonicalPath(requestedPath)
-    for allowed in configuration.allowedRoots {
-      let allowedPath = (allowed.path as NSString).expandingTildeInPath
-      let allowedCanonical = canonicalPath(allowedPath)
-      if requestedCanonical == allowedCanonical {
-        if requireExisting, !isDirectory(allowedCanonical) {
-          throw AgentProtocolError.fileNotFound("Approved root does not exist: \(allowedCanonical)")
-        }
-        return RootContext(canonicalPath: allowedCanonical, mode: allowed.mode)
-      }
+    if requireExisting, !isDirectory(requestedCanonical) {
+      throw AgentProtocolError.fileNotFound("Root does not exist: \(requestedCanonical)")
     }
 
-    throw AgentProtocolError.rootNotAllowed("Root is not approved in the macOS app: \(requestedPath)")
+    return RootContext(canonicalPath: requestedCanonical, mode: configuration.mode)
   }
 
   private func resolve(_ params: AgentRequestParams, defaultPath: String?, requireExistingRoot: Bool) throws -> ResolvedPath {
@@ -451,7 +444,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
 
   private func ensureWritable(_ resolved: ResolvedPath) throws {
     guard resolved.mode.canWrite else {
-      throw AgentProtocolError.permissionDenied("The approved root is read-only")
+      throw AgentProtocolError.permissionDenied("File editing is read-only")
     }
   }
 

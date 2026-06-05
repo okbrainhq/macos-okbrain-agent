@@ -98,15 +98,18 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
   try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
   defer { try? fileManager.removeItem(at: rootURL) }
 
+  let ignoredEnvironmentConfiguration = AgentConfiguration.current(
+    environment: ["MACOS_AGENT_ALLOWED_ROOTS": rootURL.path],
+    bundle: .main,
+    fileEditingEnabled: false
+  )
+  expect(!ignoredEnvironmentConfiguration.fileEditing.enabled, "allowed roots environment variable must not enable file editing")
+
   let configuration = AgentConfiguration(
     socketPath: "/tmp/test-agent.sock",
     version: "9.9.9",
     build: "test",
-    fileEditing: FileEditingConfiguration(
-      enabled: true,
-      mode: .readWrite,
-      allowedRoots: [FileEditingAllowedRoot(path: rootURL.path, mode: .readWrite)]
-    )
+    fileEditing: FileEditingConfiguration.toggleEnabled(true)
   )
   let handler = AgentRequestHandler(
     configuration: configuration,

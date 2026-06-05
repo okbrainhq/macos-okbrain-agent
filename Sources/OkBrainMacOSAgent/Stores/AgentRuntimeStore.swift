@@ -28,6 +28,7 @@ final class AgentRuntimeStore: ObservableObject {
   static let shared = AgentRuntimeStore()
 
   private static let preventIdleSleepDefaultsKey = "preventIdleSleepEnabled"
+  private static let fileEditingEnabledDefaultsKey = "fileEditingEnabled"
   private static let preventIdleSleepReason = "OkBrain Agent is running and ready for remote screenshots."
 
   @Published private(set) var configuration: AgentConfiguration
@@ -46,6 +47,16 @@ final class AgentRuntimeStore: ObservableObject {
       applyIdleSleepPreventionSetting()
     }
   }
+  @Published var fileEditingEnabled: Bool {
+    didSet {
+      guard fileEditingEnabled != oldValue else {
+        return
+      }
+
+      UserDefaults.standard.set(fileEditingEnabled, forKey: Self.fileEditingEnabledDefaultsKey)
+      applyFileEditingSetting()
+    }
+  }
   @Published private(set) var idleSleepPrevention: IdleSleepPreventionSnapshot
 
   private let permissionService = SystemPermissionService()
@@ -56,12 +67,17 @@ final class AgentRuntimeStore: ObservableObject {
   private var isAgentRuntimeActive = false
 
   private init() {
-    UserDefaults.standard.register(defaults: [Self.preventIdleSleepDefaultsKey: true])
+    UserDefaults.standard.register(defaults: [
+      Self.preventIdleSleepDefaultsKey: true,
+      Self.fileEditingEnabledDefaultsKey: false
+    ])
 
-    let configuration = AgentConfiguration.current()
     let preventIdleSleepEnabled = UserDefaults.standard.bool(forKey: Self.preventIdleSleepDefaultsKey)
+    let fileEditingEnabled = UserDefaults.standard.bool(forKey: Self.fileEditingEnabledDefaultsKey)
+    let configuration = AgentConfiguration.current(fileEditingEnabled: fileEditingEnabled)
     self.configuration = configuration
     self.preventIdleSleepEnabled = preventIdleSleepEnabled
+    self.fileEditingEnabled = fileEditingEnabled
     idleSleepPrevention = IdleSleepPreventionSnapshot(
       state: preventIdleSleepEnabled ? .inactive : .disabled,
       activityDescription: nil,
@@ -86,7 +102,10 @@ final class AgentRuntimeStore: ObservableObject {
     stopSocket()
     socketSnapshot = SocketServerSnapshot(status: .stopped, socketPath: configuration.socketPath)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-      self?.startSocketIfNeeded()
+      guard let self, self.isAgentRuntimeActive else {
+        return
+      }
+      self.startSocketIfNeeded()
     }
   }
 
@@ -98,6 +117,26 @@ final class AgentRuntimeStore: ObservableObject {
 
   func refreshPermissions() {
     permissions = permissionService.currentPermissions()
+  }
+
+  private func applyFileEditingSetting() {
+    let nextConfiguration = configuration.withFileEditingEnabled(fileEditingEnabled)
+    guard nextConfiguration != configuration else {
+      return
+    }
+
+    configuration = nextConfiguration
+    requestHandler = AgentRequestHandler(
+      configuration: nextConfiguration,
+      permissions: permissionService,
+      screenshots: screenshotService
+    )
+
+    if isAgentRuntimeActive {
+      restartSocket()
+    } else {
+      socketSnapshot = SocketServerSnapshot(status: .stopped, socketPath: nextConfiguration.socketPath)
+    }
   }
 
   func requestScreenRecordingAccess() {

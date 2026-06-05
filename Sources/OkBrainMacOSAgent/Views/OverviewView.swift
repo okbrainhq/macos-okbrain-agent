@@ -107,11 +107,6 @@ struct OverviewView: View {
   }
 
   private var fileEditingLabel: String {
-    guard store.configuration.fileEditing.enabled else {
-      return "Disabled"
-    }
-
-    let rootCount = store.configuration.fileEditing.allowedRoots.count
-    return "\(store.configuration.fileEditing.mode.rawValue) • \(rootCount) root\(rootCount == 1 ? "" : "s")"
+    store.configuration.fileEditing.enabled ? "Enabled • \(store.configuration.fileEditing.mode.rawValue)" : "Disabled"
   }
 }

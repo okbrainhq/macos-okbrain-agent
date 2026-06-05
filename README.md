@@ -1,6 +1,6 @@
 # OkBrain macOS Agent
 
-A macOS menu-bar agent that exposes screenshot capture, accessibility controls, and v2 root-scoped file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding.
+A macOS menu-bar agent that exposes screenshot capture, accessibility controls, and toggleable v2 file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding.
 
 See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md) and [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md) for the protocol specifications.
 
@@ -38,21 +38,9 @@ The agent starts a Unix socket at `/tmp/okbrain-macos-agent.sock` and listens fo
 
 ## File Editing
 
-File editing is disabled by default. Enable it by approving one or more absolute project roots before launch:
+File editing is disabled by default. Enable or disable it from the app's **Settings → File Editing** switch.
 
-```bash
-MACOS_AGENT_ALLOWED_ROOTS="/Users/me/projects/app|read-write;/Users/me/projects/docs|read-only" ./scripts/run.sh
-```
-
-Supported v2 actions are `workspace.describe`, `fs.stat`, `fs.list`, `fs.read`, `fs.write`, `fs.patch`, and `fs.search`. All paths are root-relative, canonicalized, symlink escapes are denied by default, and writes use SHA conflict checks plus atomic replacement.
-
-Optional limits:
-
-- `MACOS_AGENT_FILE_EDITING_MODE=read-only|read-write|disabled`
-- `MACOS_AGENT_MAX_READ_BYTES` (default `1048576`)
-- `MACOS_AGENT_MAX_WRITE_BYTES` (default `5242880`)
-- `MACOS_AGENT_MAX_SEARCH_RESULTS` (default `200`)
-- `MACOS_AGENT_MAX_LIST_ENTRIES` (default `1000`)
+Supported v2 actions are `workspace.describe`, `fs.stat`, `fs.list`, `fs.read`, `fs.write`, `fs.patch`, and `fs.search`. For now this is a simple app-level toggle: requests provide an absolute `root`, paths stay root-relative, symlink escapes are denied by default, and writes use SHA conflict checks plus atomic replacement. A proper per-root permission layer will be added later.
 
 ## Permissions
 

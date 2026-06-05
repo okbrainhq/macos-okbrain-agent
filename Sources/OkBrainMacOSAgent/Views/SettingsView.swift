@@ -69,15 +69,23 @@ struct SettingsView: View {
       }
 
       GroupBox {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
           HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-              Text("File Editing")
-                .font(.headline)
-              Text("Scopes v2 fs.* RPCs to explicitly allowed Code Project roots. Configure roots with MACOS_AGENT_ALLOWED_ROOTS.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            Toggle(
+              isOn: Binding(
+                get: { store.fileEditingEnabled },
+                set: { store.fileEditingEnabled = $0 }
+              )
+            ) {
+              VStack(alignment: .leading, spacing: 4) {
+                Text("File Editing")
+                  .font(.headline)
+                Text("Enables v2 fs.* RPCs. For now this is a simple app-level switch; per-root permissions will be added later.")
+                  .font(.callout)
+                  .foregroundStyle(.secondary)
+              }
             }
+            .toggleStyle(.switch)
 
             Spacer(minLength: 12)
 
@@ -97,18 +105,16 @@ struct SettingsView: View {
             }
 
             GridRow {
+              Text("Scope")
+                .foregroundStyle(.secondary)
+              Text(store.configuration.fileEditing.enabled ? "Any absolute root supplied by the request" : "Disabled")
+            }
+
+            GridRow {
               Text("Limits")
                 .foregroundStyle(.secondary)
               Text("read \(store.configuration.fileEditing.limits.maxReadBytes) B • write \(store.configuration.fileEditing.limits.maxWriteBytes) B")
                 .font(.callout.monospaced())
-            }
-
-            GridRow {
-              Text("Allowed Roots")
-                .foregroundStyle(.secondary)
-              Text(allowedRootsText)
-                .font(.callout.monospaced())
-                .textSelection(.enabled)
             }
           }
         }
@@ -123,16 +129,7 @@ struct SettingsView: View {
   }
 
   private var fileEditingStatus: String {
-    store.configuration.fileEditing.enabled ? store.configuration.fileEditing.mode.rawValue : "Disabled"
-  }
-
-  private var allowedRootsText: String {
-    let roots = store.configuration.fileEditing.allowedRoots
-    guard !roots.isEmpty else {
-      return "None"
-    }
-
-    return roots.map { "\($0.path) (\($0.mode.rawValue))" }.joined(separator: "\n")
+    store.configuration.fileEditing.enabled ? "Enabled" : "Disabled"
   }
 }
 

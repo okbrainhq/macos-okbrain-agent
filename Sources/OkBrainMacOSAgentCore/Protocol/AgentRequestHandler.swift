@@ -212,6 +212,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
 
     if configuration.fileEditing.enabled {
       capabilities.append(contentsOf: [
+        "workspace.describe",
         "fs.stat",
         "fs.list",
         "fs.read",

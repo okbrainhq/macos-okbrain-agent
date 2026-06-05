@@ -51,14 +51,22 @@ public struct FileEditingConfiguration: Codable, Equatable, Sendable {
     allowedRoots: [FileEditingAllowedRoot] = [],
     limits: FileEditingLimits = FileEditingLimits()
   ) {
-    let effectiveEnabled = enabled && mode != .disabled && !allowedRoots.isEmpty
+    let effectiveEnabled = enabled && mode != .disabled
     self.enabled = effectiveEnabled
     self.mode = effectiveEnabled ? mode : .disabled
-    self.allowedRoots = effectiveEnabled ? allowedRoots : []
+    self.allowedRoots = allowedRoots
     self.limits = limits
   }
 
   public static let disabled = FileEditingConfiguration()
+
+  public static func toggleEnabled(_ enabled: Bool, limits: FileEditingLimits = FileEditingLimits()) -> FileEditingConfiguration {
+    FileEditingConfiguration(
+      enabled: enabled,
+      mode: enabled ? .readWrite : .disabled,
+      limits: limits
+    )
+  }
 }
 
 public struct AgentConfiguration: Equatable, Sendable {
@@ -94,7 +102,8 @@ public struct AgentConfiguration: Equatable, Sendable {
 
   public static func current(
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    bundle: Bundle = .main
+    bundle: Bundle = .main,
+    fileEditingEnabled: Bool = false
   ) -> AgentConfiguration {
     let configuredSocketPath = environment["MACOS_AGENT_SOCKET_PATH"]?
       .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -111,27 +120,7 @@ public struct AgentConfiguration: Equatable, Sendable {
       maxListEntries: positiveInt(environment["MACOS_AGENT_MAX_LIST_ENTRIES"]) ?? 1000
     )
 
-    let requestedMode = fileEditingMode(environment["MACOS_AGENT_FILE_EDITING_MODE"])
-    let defaultRootMode: FileEditingMode = requestedMode == .readOnly ? .readOnly : .readWrite
-    let roots = parseAllowedRoots(
-      environment["MACOS_AGENT_ALLOWED_ROOTS"] ?? environment["OKBRAIN_MACOS_AGENT_ALLOWED_ROOTS"],
-      defaultMode: defaultRootMode
-    )
-    let effectiveMode = requestedMode ?? (roots.isEmpty ? .disabled : .readWrite)
-    let cappedRoots = roots.map { root in
-      FileEditingAllowedRoot(
-        path: root.path,
-        mode: effectiveMode == .readOnly ? .readOnly : root.mode
-      )
-    }
-
-    let fileEditing = FileEditingConfiguration(
-      enabled: effectiveMode != .disabled,
-      mode: effectiveMode,
-      allowedRoots: cappedRoots,
-      limits: limits
-    )
-
+    let fileEditing = FileEditingConfiguration.toggleEnabled(fileEditingEnabled, limits: limits)
     let minimumRequestBytes = fileEditing.enabled ? fileEditing.limits.maxWriteBytes + 1024 * 1024 : 64 * 1024
     let maxRequestBytes = positiveInt(environment["MACOS_AGENT_MAX_REQUEST_BYTES"]) ?? max(6 * 1024 * 1024, minimumRequestBytes)
 
@@ -144,58 +133,25 @@ public struct AgentConfiguration: Equatable, Sendable {
     )
   }
 
+  public func withFileEditingEnabled(_ enabled: Bool) -> AgentConfiguration {
+    let nextFileEditing = FileEditingConfiguration.toggleEnabled(enabled, limits: fileEditing.limits)
+    let minimumRequestBytes = nextFileEditing.enabled ? nextFileEditing.limits.maxWriteBytes + 1024 * 1024 : 64 * 1024
+
+    return AgentConfiguration(
+      socketPath: socketPath,
+      version: version,
+      build: build,
+      maxScreenshotBytes: maxScreenshotBytes,
+      maxRequestBytes: max(maxRequestBytes, minimumRequestBytes),
+      fileEditing: nextFileEditing
+    )
+  }
+
   private static func positiveInt(_ raw: String?) -> Int? {
     guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty,
           let value = Int(raw), value > 0 else {
       return nil
     }
     return value
-  }
-
-  private static func fileEditingMode(_ raw: String?) -> FileEditingMode? {
-    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else {
-      return nil
-    }
-
-    switch raw {
-    case "disabled", "off", "false", "0", "none":
-      return .disabled
-    case "read-only", "readonly", "ro":
-      return .readOnly
-    case "read-write", "readwrite", "rw", "true", "1", "enabled", "on":
-      return .readWrite
-    default:
-      return nil
-    }
-  }
-
-  private static func parseAllowedRoots(_ raw: String?, defaultMode: FileEditingMode) -> [FileEditingAllowedRoot] {
-    guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-      return []
-    }
-
-    let separators = CharacterSet(charactersIn: "\n;")
-    return raw
-      .components(separatedBy: separators)
-      .flatMap { chunk in chunk.components(separatedBy: ",") }
-      .compactMap { entry -> FileEditingAllowedRoot? in
-        let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-          return nil
-        }
-
-        let pieces = trimmed.components(separatedBy: "|")
-        let path = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty else {
-          return nil
-        }
-
-        let mode = pieces.count > 1 ? fileEditingMode(pieces[1]) ?? defaultMode : defaultMode
-        guard mode != .disabled else {
-          return nil
-        }
-
-        return FileEditingAllowedRoot(path: (path as NSString).expandingTildeInPath, mode: mode)
-      }
   }
 }
