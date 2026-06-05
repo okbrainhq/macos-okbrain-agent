@@ -53,6 +53,6 @@ test -f "$INFO_PLIST"
 test -f "$APP_ICON"
 /usr/bin/plutil -lint "$INFO_PLIST" >/dev/null
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")" = "com.okbrain.macos-agent"
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")" = "1.0.0"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")" = "2.0.0"
 
 echo "Tests passed"

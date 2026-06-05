@@ -1,8 +1,8 @@
 # OkBrain macOS Agent
 
-A macOS menu-bar agent that exposes screenshot capture and accessibility controls over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding.
+A macOS menu-bar agent that exposes screenshot capture, accessibility controls, and v2 root-scoped file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding.
 
-See [`macos-agent-ssh-socks-protocol.md`](macos-agent-ssh-socks-protocol.md) for the full protocol specification.
+See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md) and [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md) for the protocol specifications.
 
 ## Requirements
 
@@ -35,6 +35,24 @@ Output: `dist/OkBrainMacOSAgent.app`
 ```
 
 The agent starts a Unix socket at `/tmp/okbrain-macos-agent.sock` and listens for JSON requests. By default, it starts a per-process `ProcessInfo` activity with idle display/system sleep disabled while the agent is active, so remote screenshots stay available without changing global `pmset` settings or requiring sudo.
+
+## File Editing
+
+File editing is disabled by default. Enable it by approving one or more absolute project roots before launch:
+
+```bash
+MACOS_AGENT_ALLOWED_ROOTS="/Users/me/projects/app|read-write;/Users/me/projects/docs|read-only" ./scripts/run.sh
+```
+
+Supported v2 actions are `workspace.describe`, `fs.stat`, `fs.list`, `fs.read`, `fs.write`, `fs.patch`, and `fs.search`. All paths are root-relative, canonicalized, symlink escapes are denied by default, and writes use SHA conflict checks plus atomic replacement.
+
+Optional limits:
+
+- `MACOS_AGENT_FILE_EDITING_MODE=read-only|read-write|disabled`
+- `MACOS_AGENT_MAX_READ_BYTES` (default `1048576`)
+- `MACOS_AGENT_MAX_WRITE_BYTES` (default `5242880`)
+- `MACOS_AGENT_MAX_SEARCH_RESULTS` (default `200`)
+- `MACOS_AGENT_MAX_LIST_ENTRIES` (default `1000`)
 
 ## Permissions
 

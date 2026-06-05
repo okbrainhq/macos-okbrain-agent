@@ -11,10 +11,16 @@ public enum PermissionState: String, Codable, Equatable, Sendable {
 public struct AgentPermissionsPayload: Codable, Equatable, Sendable {
   public let screenRecording: PermissionState
   public let accessibility: PermissionState
+  public let fileAccess: PermissionState?
 
-  public init(screenRecording: PermissionState, accessibility: PermissionState) {
+  public init(
+    screenRecording: PermissionState,
+    accessibility: PermissionState,
+    fileAccess: PermissionState? = nil
+  ) {
     self.screenRecording = screenRecording
     self.accessibility = accessibility
+    self.fileAccess = fileAccess
   }
 }
 

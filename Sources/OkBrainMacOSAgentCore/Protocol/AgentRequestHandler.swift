@@ -8,12 +8,23 @@ public final class AgentRequestHandler: @unchecked Sendable {
   private let configuration: AgentConfiguration
   private let permissions: PermissionChecking
   private let screenshots: ScreenshotCapturing
+  private let fileEditing: FileEditingServicing
 
-  private let v1Actions: Set<String> = [
+  private let envelopeActions: Set<String> = [
     "agent.status",
     "agent.info",
     "permissions.status",
     "screenshot.capture"
+  ]
+
+  private let fileActions: Set<String> = [
+    "workspace.describe",
+    "fs.stat",
+    "fs.list",
+    "fs.read",
+    "fs.write",
+    "fs.patch",
+    "fs.search"
   ]
 
   private let legacyActions: Set<String> = [
@@ -26,15 +37,18 @@ public final class AgentRequestHandler: @unchecked Sendable {
   public init(
     configuration: AgentConfiguration,
     permissions: PermissionChecking = SystemPermissionService(),
-    screenshots: ScreenshotCapturing = ScreenCaptureKitScreenshotService()
+    screenshots: ScreenshotCapturing = ScreenCaptureKitScreenshotService(),
+    fileEditing: FileEditingServicing? = nil
   ) {
     self.configuration = configuration
     self.permissions = permissions
     self.screenshots = screenshots
+    self.fileEditing = fileEditing ?? LocalFileEditingService(configuration: configuration.fileEditing)
   }
 
   public func handle(requestData: Data) -> Data {
     var responseID = "unknown"
+    var responseProtocol = AgentConfiguration.protocolName
 
     do {
       guard !requestData.isEmpty else {
@@ -50,37 +64,95 @@ public final class AgentRequestHandler: @unchecked Sendable {
         throw AgentProtocolError.invalidRequest("Request action is required")
       }
 
-      if v1Actions.contains(action) {
-        guard request.protocolName == AgentConfiguration.protocolName else {
-          throw AgentProtocolError.protocolMismatch("Expected protocol \(AgentConfiguration.protocolName)")
+      if envelopeActions.contains(action) {
+        guard let protocolName = request.protocolName,
+              AgentConfiguration.supportedProtocolVersions.contains(protocolName) else {
+          throw AgentProtocolError.protocolMismatch("Expected protocol \(AgentConfiguration.protocolName) or \(AgentConfiguration.protocolV2Name)")
         }
-      } else if !legacyActions.contains(action) {
+        responseProtocol = protocolName
+      } else if fileActions.contains(action) {
+        guard request.protocolName == AgentConfiguration.protocolV2Name else {
+          throw AgentProtocolError.unsupportedProtocol("File editing actions require protocol \(AgentConfiguration.protocolV2Name)")
+        }
+        responseProtocol = AgentConfiguration.protocolV2Name
+      } else if legacyActions.contains(action) {
+        responseProtocol = AgentConfiguration.protocolName
+      } else {
         throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
       }
 
       switch action {
       case "agent.status":
-        return try encodeSuccess(id: requestID, data: statusPayload())
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: statusPayload())
       case "permissions.status":
-        return try encodeSuccess(id: requestID, data: permissions.currentPermissions())
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: permissionsWithFileAccess())
       case "agent.info":
-        return try encodeSuccess(id: requestID, data: infoPayload())
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: infoPayload())
       case "screenshot.capture":
-        return try capture(id: requestID, params: request.params ?? AgentRequestParams(mode: "full", format: "png"))
+        return try capture(
+          protocolName: responseProtocol,
+          id: requestID,
+          params: request.params ?? AgentRequestParams(mode: "full", format: "png")
+        )
+      case "workspace.describe":
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: fileEditing.describeWorkspace(request.params ?? AgentRequestParams())
+        )
+      case "fs.stat":
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: fileEditing.stat(request.params ?? AgentRequestParams())
+        )
+      case "fs.list":
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: fileEditing.list(request.params ?? AgentRequestParams())
+        )
+      case "fs.read":
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: fileEditing.read(request.params ?? AgentRequestParams())
+        )
+      case "fs.write":
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: fileEditing.write(request.params ?? AgentRequestParams())
+        )
+      case "fs.patch":
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: fileEditing.patch(request.params ?? AgentRequestParams())
+        )
+      case "fs.search":
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: fileEditing.search(request.params ?? AgentRequestParams())
+        )
       case "ping":
-        return try encodeSuccess(id: requestID, data: PingPayload(pong: true, version: configuration.version))
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: PingPayload(pong: true, version: configuration.version))
       case "capture_full":
         return try capture(
+          protocolName: responseProtocol,
           id: requestID,
           params: mergingLegacyMode("full", into: request.params)
         )
       case "capture_window":
         return try capture(
+          protocolName: responseProtocol,
           id: requestID,
           params: mergingLegacyMode("window", into: request.params)
         )
       case "capture_region":
         return try capture(
+          protocolName: responseProtocol,
           id: requestID,
           params: mergingLegacyMode("region", into: request.params)
         )
@@ -88,9 +160,10 @@ public final class AgentRequestHandler: @unchecked Sendable {
         throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
       }
     } catch let error as AgentProtocolError {
-      return errorResponseData(id: responseID, error: error)
+      return errorResponseData(protocolName: responseProtocol, id: responseID, error: error)
     } catch {
       return errorResponseData(
+        protocolName: responseProtocol,
         id: responseID,
         error: .invalidRequest("Unable to decode request JSON: \(error.localizedDescription)")
       )
@@ -98,20 +171,23 @@ public final class AgentRequestHandler: @unchecked Sendable {
   }
 
   public func errorResponseData(id: String, error: AgentProtocolError) -> Data {
+    errorResponseData(protocolName: AgentConfiguration.protocolName, id: id, error: error)
+  }
+
+  private func errorResponseData(protocolName: String, id: String, error: AgentProtocolError) -> Data {
     do {
       return try JSONEncoder().encode(ErrorEnvelope(
-        protocolName: AgentConfiguration.protocolName,
+        protocolName: protocolName,
         id: id,
         error: ErrorPayload(code: error.code, message: error.message)
       ))
     } catch {
-      return Data(
-        #"{"protocol":"okbrain.macos-agent.v1","id":"unknown","ok":false,"error":{"code":"encode_failed","message":"Unable to encode response"}}"#.utf8
-      )
+      let fallback = "{\"protocol\":\"\(protocolName)\",\"id\":\"unknown\",\"ok\":false,\"error\":{\"code\":\"encode_failed\",\"message\":\"Unable to encode response\"}}"
+      return Data(fallback.utf8)
     }
   }
 
-  private func capture(id: String, params: AgentRequestParams) throws -> Data {
+  private func capture(protocolName: String, id: String, params: AgentRequestParams) throws -> Data {
     let currentPermissions = permissions.currentPermissions()
     guard currentPermissions.screenRecording == .granted else {
       throw AgentProtocolError.permissionDenied("Screen Recording permission is not granted")
@@ -122,24 +198,48 @@ public final class AgentRequestHandler: @unchecked Sendable {
       throw AgentProtocolError.responseTooLarge(image.pngData.count)
     }
 
-    return try encodeSuccess(id: id, data: ScreenshotCapturePayload(image: image))
+    return try encodeSuccess(protocolName: protocolName, id: id, data: ScreenshotCapturePayload(image: image))
   }
 
   private func statusPayload() -> AgentStatusPayload {
-    let currentPermissions = permissions.currentPermissions()
+    let currentPermissions = permissionsWithFileAccess()
+    var capabilities = [
+      "screenshot.full",
+      "screenshot.window",
+      "screenshot.region",
+      "screenshot.cursor"
+    ]
+
+    if configuration.fileEditing.enabled {
+      capabilities.append(contentsOf: [
+        "fs.stat",
+        "fs.list",
+        "fs.read",
+        "fs.write",
+        "fs.patch",
+        "fs.search"
+      ])
+    }
+
     return AgentStatusPayload(
       installed: true,
       running: true,
-      available: currentPermissions.screenRecording == .granted,
+      available: currentPermissions.screenRecording == .granted || configuration.fileEditing.enabled,
       version: configuration.version,
       socketPath: configuration.socketPath,
       permissions: currentPermissions,
-      capabilities: [
-        "screenshot.full",
-        "screenshot.window",
-        "screenshot.region",
-        "screenshot.cursor"
-      ]
+      capabilities: capabilities,
+      protocolVersions: AgentConfiguration.supportedProtocolVersions,
+      fileEditing: FileEditingStatusPayload(configuration: configuration.fileEditing)
+    )
+  }
+
+  private func permissionsWithFileAccess() -> AgentPermissionsPayload {
+    let current = permissions.currentPermissions()
+    return AgentPermissionsPayload(
+      screenRecording: current.screenRecording,
+      accessibility: current.accessibility,
+      fileAccess: configuration.fileEditing.enabled ? .granted : .unknown
     )
   }
 
@@ -149,7 +249,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
       build: configuration.build,
       protocolName: AgentConfiguration.protocolName,
       socketPath: configuration.socketPath,
-      transport: "ssh-unix-socket"
+      transport: "ssh-unix-socket",
+      protocolVersions: AgentConfiguration.supportedProtocolVersions
     )
   }
 
@@ -166,9 +267,9 @@ public final class AgentRequestHandler: @unchecked Sendable {
     return trimmedID?.isEmpty == false ? trimmedID! : "req_\(UUID().uuidString)"
   }
 
-  private func encodeSuccess<T: Encodable>(id: String, data: T) throws -> Data {
+  private func encodeSuccess<T: Encodable>(protocolName: String, id: String, data: T) throws -> Data {
     try JSONEncoder().encode(SuccessEnvelope(
-      protocolName: AgentConfiguration.protocolName,
+      protocolName: protocolName,
       id: id,
       data: data
     ))

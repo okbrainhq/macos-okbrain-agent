@@ -1,3 +1,4 @@
+import OkBrainMacOSAgentCore
 import SwiftUI
 
 struct SettingsView: View {
@@ -66,12 +67,72 @@ struct SettingsView: View {
         }
         .padding(4)
       }
+
+      GroupBox {
+        VStack(alignment: .leading, spacing: 12) {
+          HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+              Text("File Editing")
+                .font(.headline)
+              Text("Scopes v2 fs.* RPCs to explicitly allowed Code Project roots. Configure roots with MACOS_AGENT_ALLOWED_ROOTS.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            StatusPill(
+              title: fileEditingStatus,
+              systemImage: store.configuration.fileEditing.enabled ? "checkmark.circle.fill" : "lock.doc",
+              tint: store.configuration.fileEditing.enabled ? .green : .secondary
+            )
+          }
+
+          Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 10) {
+            GridRow {
+              Text("Mode")
+                .foregroundStyle(.secondary)
+              Text(store.configuration.fileEditing.mode.rawValue)
+                .font(.callout.monospaced())
+            }
+
+            GridRow {
+              Text("Limits")
+                .foregroundStyle(.secondary)
+              Text("read \(store.configuration.fileEditing.limits.maxReadBytes) B • write \(store.configuration.fileEditing.limits.maxWriteBytes) B")
+                .font(.callout.monospaced())
+            }
+
+            GridRow {
+              Text("Allowed Roots")
+                .foregroundStyle(.secondary)
+              Text(allowedRootsText)
+                .font(.callout.monospaced())
+                .textSelection(.enabled)
+            }
+          }
+        }
+        .padding(4)
+      }
     }
     .frame(maxWidth: .infinity, alignment: .topLeading)
   }
 
   private var activityText: String {
     store.idleSleepPrevention.activityDescription ?? "None"
+  }
+
+  private var fileEditingStatus: String {
+    store.configuration.fileEditing.enabled ? store.configuration.fileEditing.mode.rawValue : "Disabled"
+  }
+
+  private var allowedRootsText: String {
+    let roots = store.configuration.fileEditing.allowedRoots
+    guard !roots.isEmpty else {
+      return "None"
+    }
+
+    return roots.map { "\($0.path) (\($0.mode.rawValue))" }.joined(separator: "\n")
   }
 }
 

@@ -1,3 +1,4 @@
+import OkBrainMacOSAgentCore
 import SwiftUI
 
 struct OverviewView: View {
@@ -45,9 +46,19 @@ struct OverviewView: View {
         GridRow {
           Text("Protocol")
             .foregroundStyle(.secondary)
-          Text("okbrain.macos-agent.v1")
+          Text(AgentConfiguration.supportedProtocolVersions.joined(separator: ", "))
             .font(.callout.monospaced())
             .textSelection(.enabled)
+        }
+
+        GridRow {
+          Text("File Editing")
+            .foregroundStyle(.secondary)
+          StatusPill(
+            title: fileEditingLabel,
+            systemImage: store.configuration.fileEditing.enabled ? "doc.text.fill" : "doc.text.magnifyingglass",
+            tint: store.configuration.fileEditing.enabled ? .green : .secondary
+          )
         }
 
         GridRow {
@@ -93,5 +104,14 @@ struct OverviewView: View {
     .onAppear {
       store.refreshPermissions()
     }
+  }
+
+  private var fileEditingLabel: String {
+    guard store.configuration.fileEditing.enabled else {
+      return "Disabled"
+    }
+
+    let rootCount = store.configuration.fileEditing.allowedRoots.count
+    return "\(store.configuration.fileEditing.mode.rawValue) • \(rootCount) root\(rootCount == 1 ? "" : "s")"
   }
 }

@@ -4,7 +4,7 @@ set -euo pipefail
 APP_NAME="OkBrainMacOSAgent"
 BUNDLE_ID="com.okbrain.macos-agent"
 MIN_SYSTEM_VERSION="14.0"
-VERSION="1.0.0"
+VERSION="2.0.0"
 BUILD="1"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

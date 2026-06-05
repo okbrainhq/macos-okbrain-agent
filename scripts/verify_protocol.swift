@@ -87,6 +87,137 @@ func runProtocolVerifier() throws {
   )
   expect(legacy.ok, "legacy capture_full should be accepted")
   expectEqual(legacy.id, "legacy_1", "legacy id")
+
+  try runFileEditingVerifier(permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .unknown)))
+}
+
+func runFileEditingVerifier(permissions: FakePermissionService) throws {
+  let fileManager = FileManager.default
+  let rootURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    .appendingPathComponent("okbrain-agent-fs-\(UUID().uuidString)", isDirectory: true)
+  try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+  defer { try? fileManager.removeItem(at: rootURL) }
+
+  let configuration = AgentConfiguration(
+    socketPath: "/tmp/test-agent.sock",
+    version: "9.9.9",
+    build: "test",
+    fileEditing: FileEditingConfiguration(
+      enabled: true,
+      mode: .readWrite,
+      allowedRoots: [FileEditingAllowedRoot(path: rootURL.path, mode: .readWrite)]
+    )
+  )
+  let handler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: permissions,
+    screenshots: FakeScreenshotService(capturedImage: CapturedImage(pngData: Data([0x89, 0x50]), width: 1, height: 1))
+  )
+
+  let status: Envelope<AgentStatusPayload> = try send(
+    AgentRequest(protocolName: AgentConfiguration.protocolV2Name, id: "fs_status", action: "agent.status", params: AgentRequestParams()),
+    to: handler
+  )
+  expect(status.ok, "v2 status response should be ok")
+  expectEqual(status.protocolName, AgentConfiguration.protocolV2Name, "v2 status protocol")
+  expect(status.data?.capabilities.contains("fs.read") == true, "v2 status should expose fs.read")
+  expectEqual(status.data?.fileEditing?.mode, .readWrite, "file editing mode")
+
+  let workspace: Envelope<WorkspaceDescribePayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolV2Name,
+      id: "fs_workspace",
+      action: "workspace.describe",
+      params: AgentRequestParams(root: rootURL.path)
+    ),
+    to: handler
+  )
+  expect(workspace.ok, "workspace.describe should be ok")
+  expectEqual(workspace.data?.exists, true, "workspace exists")
+
+  let write: Envelope<FileWritePayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolV2Name,
+      id: "fs_write",
+      action: "fs.write",
+      params: AgentRequestParams(
+        root: rootURL.path,
+        path: "src/app.txt",
+        content: "one\nreturn null\nthree\n",
+        createDirs: true
+      )
+    ),
+    to: handler
+  )
+  expect(write.ok, "fs.write should be ok")
+  expectEqual(write.data?.path, "src/app.txt", "write path")
+  expect(write.data?.sha256.isEmpty == false, "write sha")
+
+  let read: Envelope<FileReadPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolV2Name,
+      id: "fs_read",
+      action: "fs.read",
+      params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", startLine: 2, endLine: 2)
+    ),
+    to: handler
+  )
+  expect(read.ok, "fs.read should be ok")
+  expectEqual(read.data?.content, "return null\n", "read line range")
+
+  let patch: Envelope<FilePatchPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolV2Name,
+      id: "fs_patch",
+      action: "fs.patch",
+      params: AgentRequestParams(
+        root: rootURL.path,
+        path: "src/app.txt",
+        expectedSha256: write.data?.sha256,
+        edits: [FilePatchEdit(oldText: "return null", newText: "return 42", startLine: 2)]
+      )
+    ),
+    to: handler
+  )
+  expect(patch.ok, "fs.patch should be ok")
+  expectEqual(patch.data?.changedLines, [2], "patch changed lines")
+
+  let search: Envelope<FileSearchPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolV2Name,
+      id: "fs_search",
+      action: "fs.search",
+      params: AgentRequestParams(root: rootURL.path, path: ".", glob: "*.txt", query: "return 42")
+    ),
+    to: handler
+  )
+  expect(search.ok, "fs.search should be ok")
+  expectEqual(search.data?.matches.first?.path, "src/app.txt", "search match path")
+  expectEqual(search.data?.matches.first?.line, 2, "search match line")
+
+  let list: Envelope<FileListPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolV2Name,
+      id: "fs_list",
+      action: "fs.list",
+      params: AgentRequestParams(root: rootURL.path, path: ".", recursive: true, glob: "*.txt")
+    ),
+    to: handler
+  )
+  expect(list.ok, "fs.list should be ok")
+  expect(list.data?.entries.contains(where: { $0.path == "src/app.txt" }) == true, "list should include file")
+
+  let escape: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolV2Name,
+      id: "fs_escape",
+      action: "fs.read",
+      params: AgentRequestParams(root: rootURL.path, path: "../outside.txt")
+    ),
+    to: handler
+  )
+  expect(!escape.ok, "root escape should fail")
+  expectEqual(escape.error?.code, "path_outside_root", "root escape error code")
 }
 
 func runSocketVerifier() throws {
