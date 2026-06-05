@@ -40,7 +40,7 @@ The agent starts a Unix socket at `/tmp/okbrain-macos-agent.sock` and listens fo
 
 File editing is disabled by default. Enable or disable it from the app's **Settings → File Editing** switch.
 
-Supported v2 actions are `workspace.describe`, `fs.stat`, `fs.list`, `fs.read`, `fs.write`, `fs.patch`, and `fs.search`. File access is default-deny: enable **Settings → File Editing**, then add folder rules in **File Permissions**. A read or write rule applies to that folder and all nested paths unless a more specific child-folder rule overrides it. Requests still provide an absolute `root`, paths stay root-relative, symlink escapes are denied by default, and writes use SHA conflict checks plus atomic replacement.
+Supported v2 actions are `workspace.describe`, `fs.stat`, `fs.list`, `fs.read`, `fs.write`, `fs.patch`, and `fs.search`. File access is default-deny: enable **Settings → File Editing**, then add folder rules in **File Permissions**. A read or write rule applies to that folder and all nested paths unless a more specific child-folder rule overrides it. Requests still provide an absolute `root`, paths stay root-relative, `fs.search` accepts either a directory or a single file path, symlink escapes are denied by default, and writes use SHA conflict checks plus atomic replacement.
 
 ## Testing
 

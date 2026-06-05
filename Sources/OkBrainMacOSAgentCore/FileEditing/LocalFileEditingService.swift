@@ -321,8 +321,8 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
 
     let resolved = try resolve(params, defaultPath: ".", requireExistingRoot: true)
     try ensureReadable(resolved)
-    guard isDirectory(resolved.url.path) else {
-      throw AgentProtocolError.notADirectory("Search target is not a directory: \(resolved.relativePath)")
+    guard let targetInfo = lstatInfo(resolved.url.path) else {
+      throw AgentProtocolError.fileNotFound("Search target does not exist: \(resolved.relativePath)")
     }
 
     let includeHidden = params.includeHidden ?? false
@@ -336,51 +336,28 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     var matches: [FileSearchMatchPayload] = []
     var truncated = false
 
-    let enumerator = fileManager.enumerator(
-      at: resolved.url,
-      includingPropertiesForKeys: nil,
-      options: [.skipsPackageDescendants],
-      errorHandler: nil
-    )
-
-    while let url = enumerator?.nextObject() as? URL {
-      let relative = relativePath(for: url.path, root: resolved.rootPath)
-      if shouldSkipTraversal(relativePath: relative, includeHidden: includeHidden, ignoreMatcher: ignoreMatcher) {
-        if isDirectory(url.path) {
-          enumerator?.skipDescendants()
-        }
-        continue
-      }
-
-      guard let info = lstatInfo(url.path) else {
-        continue
-      }
-
-      if fileType(info) == "directory" {
-        continue
-      }
+    func appendMatches(in url: URL, relative: String, info: Darwin.stat) {
       guard fileType(info) == "file" else {
-        continue
+        return
       }
       guard globMatches(glob, relativePath: relative, basename: url.lastPathComponent) else {
-        continue
+        return
       }
       guard info.st_size <= configuration.limits.maxReadBytes else {
-        continue
+        return
       }
 
       let data: Data
       do {
         data = try Data(contentsOf: url)
       } catch {
-        continue
+        return
       }
       guard !isBinaryData(data), let text = String(data: data, encoding: .utf8) else {
-        continue
+        return
       }
 
       var lineNo = 0
-      var shouldStopFile = false
       text.enumerateLines { line, stop in
         lineNo += 1
         let isMatch: Bool
@@ -396,15 +373,52 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
             matches.append(FileSearchMatchPayload(path: relative, line: lineNo, text: line))
           } else {
             truncated = true
-            shouldStopFile = true
             stop = true
           }
         }
       }
+    }
 
-      if shouldStopFile || truncated {
-        break
+    switch fileType(targetInfo) {
+    case "directory":
+      let enumerator = fileManager.enumerator(
+        at: resolved.url,
+        includingPropertiesForKeys: nil,
+        options: [.skipsPackageDescendants],
+        errorHandler: nil
+      )
+
+      while let url = enumerator?.nextObject() as? URL {
+        let relative = relativePath(for: url.path, root: resolved.rootPath)
+        if shouldSkipTraversal(relativePath: relative, includeHidden: includeHidden, ignoreMatcher: ignoreMatcher) {
+          if isDirectory(url.path) {
+            enumerator?.skipDescendants()
+          }
+          continue
+        }
+
+        if isSymlink(url.path), isDirectoryFollowingSymlink(url.path) {
+          enumerator?.skipDescendants()
+        }
+
+        guard let info = lstatInfo(url.path) else {
+          continue
+        }
+        guard fileType(info) == "file" else {
+          continue
+        }
+
+        appendMatches(in: url, relative: relative, info: info)
+        if truncated {
+          break
+        }
       }
+    case "file":
+      if shouldInclude(relativePath: resolved.relativePath, includeHidden: includeHidden, ignoreMatcher: ignoreMatcher) {
+        appendMatches(in: resolved.url, relative: resolved.relativePath, info: targetInfo)
+      }
+    default:
+      throw AgentProtocolError.notAFile("Search target is not a file or directory: \(resolved.relativePath)")
     }
 
     return FileSearchPayload(matches: matches, truncated: truncated)

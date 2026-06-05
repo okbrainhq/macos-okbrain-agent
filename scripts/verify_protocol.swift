@@ -245,6 +245,20 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
   expectEqual(search.data?.matches.first?.path, "src/app.txt", "search match path")
   expectEqual(search.data?.matches.first?.line, 2, "search match line")
 
+  let fileSearch: Envelope<FileSearchPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolV2Name,
+      id: "fs_search_file",
+      action: "fs.search",
+      params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", query: "inserted")
+    ),
+    to: handler
+  )
+  expect(fileSearch.ok, "fs.search should accept a single-file path")
+  expect(fileSearch.data?.matches.count == 1, "single-file search should return one match")
+  expectEqual(fileSearch.data?.matches.first?.path, "src/app.txt", "single-file search match path")
+  expectEqual(fileSearch.data?.matches.first?.line, 3, "single-file search match line")
+
   let list: Envelope<FileListPayload> = try send(
     AgentRequest(
       protocolName: AgentConfiguration.protocolV2Name,

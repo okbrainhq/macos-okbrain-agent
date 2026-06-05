@@ -373,7 +373,7 @@ Patch rules:
 
 ### `fs.search`
 
-Searches file contents inside the root.
+Searches file contents inside a directory or a single file under the root. When `path` points to a directory, the search walks files below it; when `path` points to a file, only that file is searched. `glob` still filters candidate file paths.
 
 ```json
 {
