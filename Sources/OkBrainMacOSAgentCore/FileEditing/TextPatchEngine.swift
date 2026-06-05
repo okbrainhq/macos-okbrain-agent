@@ -10,6 +10,25 @@ struct PatchMatch: Equatable, Sendable {
   let line: Int
   let column: Int
   let kind: PatchMatchKind
+  let warnings: [String]
+
+  init(
+    range: Range<String.Index>,
+    line: Int,
+    column: Int,
+    kind: PatchMatchKind,
+    warnings: [String] = []
+  ) {
+    self.range = range
+    self.line = line
+    self.column = column
+    self.kind = kind
+    self.warnings = warnings
+  }
+
+  func addingWarning(_ warning: String) -> PatchMatch {
+    PatchMatch(range: range, line: line, column: column, kind: kind, warnings: warnings + [warning])
+  }
 }
 
 struct SourceSpan: Equatable, Sendable {
@@ -242,22 +261,34 @@ struct TextPatchEngine: Sendable {
   }
 
   private func selectMatch(_ matches: [PatchMatch], startLine: Int?) throws -> PatchMatch {
-    let selectedMatches: [PatchMatch]
     if let startLine {
-      selectedMatches = matches.filter { $0.line == startLine }
-    } else {
-      selectedMatches = matches
+      let selectedMatches = matches.filter { $0.line == startLine }
+
+      if selectedMatches.isEmpty {
+        guard matches.count == 1 else {
+          throw AgentProtocolError.ambiguousPatch(startLineMissedAmbiguousPatchMessage(matches: matches, startLine: startLine))
+        }
+
+        let match = matches[0]
+        return match.addingWarning(startLineFallbackWarning(startLine: startLine, match: match))
+      }
+
+      guard selectedMatches.count == 1 else {
+        throw AgentProtocolError.ambiguousPatch(ambiguousPatchMessage(matches: selectedMatches, startLine: startLine))
+      }
+
+      return selectedMatches[0]
     }
 
-    guard !selectedMatches.isEmpty else {
+    guard !matches.isEmpty else {
       throw AgentProtocolError.patchNotFound(patchNotFoundMessage(startLine: startLine))
     }
 
-    guard selectedMatches.count == 1 else {
-      throw AgentProtocolError.ambiguousPatch(ambiguousPatchMessage(matches: selectedMatches, startLine: startLine))
+    guard matches.count == 1 else {
+      throw AgentProtocolError.ambiguousPatch(ambiguousPatchMessage(matches: matches, startLine: startLine))
     }
 
-    return selectedMatches[0]
+    return matches[0]
   }
 
   private func patchNotFoundMessage(startLine: Int?) -> String {
@@ -265,6 +296,19 @@ struct TextPatchEngine: Sendable {
       return "Patch oldText was not found at startLine \(startLine)"
     }
     return "Patch oldText was not found"
+  }
+
+  private func startLineFallbackWarning(startLine: Int, match: PatchMatch) -> String {
+    "Patch oldText was not found at startLine \(startLine); applied the unique match at \(match.line):\(match.column) instead"
+  }
+
+  private func startLineMissedAmbiguousPatchMessage(matches: [PatchMatch], startLine: Int) -> String {
+    let locations = matches
+      .prefix(10)
+      .map { "\($0.line):\($0.column)" }
+      .joined(separator: ", ")
+    let suffix = matches.count > 10 ? ", …" : ""
+    return "Patch oldText was not found at startLine \(startLine), but matched multiple other locations: \(locations)\(suffix); provide the correct startLine or a more specific oldText"
   }
 
   private func ambiguousPatchMessage(matches: [PatchMatch], startLine: Int?) -> String {

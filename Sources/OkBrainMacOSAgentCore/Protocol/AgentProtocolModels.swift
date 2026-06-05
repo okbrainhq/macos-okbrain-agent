@@ -459,14 +459,24 @@ public struct FilePatchPayload: Codable, Equatable, Sendable {
   public let sha256: String
   public let changedLines: [Int]
   public let backupPath: String?
+  public let warnings: [String]?
 
-  public init(path: String, applied: Int, previousSha256: String, sha256: String, changedLines: [Int], backupPath: String?) {
+  public init(
+    path: String,
+    applied: Int,
+    previousSha256: String,
+    sha256: String,
+    changedLines: [Int],
+    backupPath: String?,
+    warnings: [String]? = nil
+  ) {
     self.path = path
     self.applied = applied
     self.previousSha256 = previousSha256
     self.sha256 = sha256
     self.changedLines = changedLines
     self.backupPath = backupPath
+    self.warnings = warnings
   }
 }
 

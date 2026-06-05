@@ -354,7 +354,10 @@ Expected `data`:
   "previousSha256": "abc123...",
   "sha256": "def456...",
   "changedLines": [2],
-  "backupPath": ".okbrain-backups/20260605T000000Z/src/app/page.tsx"
+  "backupPath": ".okbrain-backups/20260605T000000Z/src/app/page.tsx",
+  "warnings": [
+    "Patch oldText was not found at startLine 20; applied the unique match at 2:1 instead"
+  ]
 }
 ```
 
@@ -363,6 +366,8 @@ Patch rules:
 - Prefer exact matching.
 - If exact matching fails and `whitespaceNormalizedFallback` is true, normalize trailing whitespace and CRLF/LF only.
 - If `oldText` appears multiple times and `startLine` is missing, reject with `ambiguous_patch`.
+- If `startLine` is provided but does not match and `oldText` has exactly one match elsewhere, apply that unique match and return a `warnings` entry.
+- If `startLine` is provided but does not match and `oldText` has multiple matches elsewhere, reject with `ambiguous_patch`.
 - If no match is found, reject with `patch_not_found`.
 - `dryRun: true` returns the same metadata without writing.
 

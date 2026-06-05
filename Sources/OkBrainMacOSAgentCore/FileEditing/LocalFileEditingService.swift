@@ -273,6 +273,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     let fallback = params.whitespaceNormalizedFallback ?? true
     let patchEngine = TextPatchEngine()
     var changedLines: [Int] = []
+    var warnings: [String] = []
 
     for edit in edits {
       let match = try patchEngine.findMatch(
@@ -282,6 +283,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
         whitespaceNormalizedFallback: fallback
       )
       changedLines.append(match.line)
+      warnings.append(contentsOf: match.warnings)
       text.replaceSubrange(match.range, with: edit.newText)
     }
 
@@ -307,7 +309,8 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
       previousSha256: previousSha,
       sha256: newSha,
       changedLines: Array(Set(changedLines)).sorted(),
-      backupPath: backupPath
+      backupPath: backupPath,
+      warnings: warnings.isEmpty ? nil : warnings
     )
   }
 

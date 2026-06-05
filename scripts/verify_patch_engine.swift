@@ -14,6 +14,9 @@ func runPatchEngineVerifier() throws {
   try verify("finalTrailingNewlinesDoNotAffectNormalizedMatching", finalTrailingNewlinesDoNotAffectNormalizedMatching)
   try verify("midLineSafetyPreservesUntouchedContentAfterIgnoredWhitespace", midLineSafetyPreservesUntouchedContentAfterIgnoredWhitespace)
   try verify("unicodeEmojiTextPatchesCorrectly", unicodeEmojiTextPatchesCorrectly)
+  try verify("wrongStartLineUniqueMatchFallsBackWithWarning", wrongStartLineUniqueMatchFallsBackWithWarning)
+  try verify("wrongStartLineWithDuplicateMatchesReturnsAmbiguousPatch", wrongStartLineWithDuplicateMatchesReturnsAmbiguousPatch)
+  try verify("patchPayloadIncludesStartLineFallbackWarning", patchPayloadIncludesStartLineFallbackWarning)
   try verify("dryRunReturnsMetadataWithoutWriting", dryRunReturnsMetadataWithoutWriting)
   try verify("expectedSHAMismatchReturnsContentConflict", expectedSHAMismatchReturnsContentConflict)
   try verify("multiEditSuccessAppliesAllEdits", multiEditSuccessAppliesAllEdits)
@@ -209,6 +212,56 @@ private func unicodeEmojiTextPatchesCorrectly() throws {
 
   source.replaceSubrange(match.range, with: "goodbye 🌍")
   try expectEqual(source, "hello 👋\ngoodbye 🌍\n", "Unicode patch result")
+}
+
+private func wrongStartLineUniqueMatchFallsBackWithWarning() throws {
+  let engine = TextPatchEngine()
+  var source = "one\ntarget\nthree\n"
+  let match = try engine.findMatch(
+    oldText: "target",
+    in: source,
+    startLine: 99,
+    whitespaceNormalizedFallback: true
+  )
+
+  try expectEqual(match.line, 2, "fallback should use unique actual line")
+  try expectEqual(match.warnings.count, 1, "fallback should report one warning")
+  try expect(match.warnings[0].contains("startLine 99"), "fallback warning should mention requested startLine")
+  try expect(match.warnings[0].contains("2:1"), "fallback warning should mention actual location")
+  source.replaceSubrange(match.range, with: "patched")
+  try expectEqual(source, "one\npatched\nthree\n", "fallback patch result")
+}
+
+private func wrongStartLineWithDuplicateMatchesReturnsAmbiguousPatch() throws {
+  let engine = TextPatchEngine()
+  try expectProtocolError("ambiguous_patch") {
+    _ = try engine.findMatch(
+      oldText: "target",
+      in: "target\nother\ntarget\n",
+      startLine: 99,
+      whitespaceNormalizedFallback: true
+    )
+  } validateMessage: { message in
+    try expect(message.contains("startLine 99"), "ambiguous fallback message should mention requested startLine")
+    try expect(message.contains("1:1"), "ambiguous fallback message should include first location")
+    try expect(message.contains("3:1"), "ambiguous fallback message should include second location")
+  }
+}
+
+private func patchPayloadIncludesStartLineFallbackWarning() throws {
+  let fixture = try PatchFixture(content: "one\ntwo\n")
+  defer { fixture.remove() }
+
+  let payload = try fixture.service.patch(AgentRequestParams(
+    root: fixture.rootPath,
+    path: fixture.fileName,
+    edits: [FilePatchEdit(oldText: "two", newText: "three", startLine: 99)]
+  ))
+
+  try expectEqual(payload.changedLines, [2], "fallback payload changed lines")
+  try expectEqual(payload.warnings?.count, 1, "fallback payload warning count")
+  try expect(payload.warnings?.first?.contains("startLine 99") == true, "fallback payload warning should mention requested startLine")
+  try expectEqual(try fixture.read(), "one\nthree\n", "fallback payload should write patched content")
 }
 
 private func dryRunReturnsMetadataWithoutWriting() throws {
