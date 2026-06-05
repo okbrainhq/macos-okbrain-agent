@@ -83,10 +83,8 @@ public struct FileEditingConfiguration: Codable, Equatable, Sendable {
 }
 
 public struct AgentConfiguration: Equatable, Sendable {
-  public static let protocolV1Name = "okbrain.macos-agent.v1"
-  public static let protocolV2Name = "okbrain.macos-agent.v2"
-  public static let protocolName = protocolV1Name
-  public static let supportedProtocolVersions = [protocolV1Name, protocolV2Name]
+  public static let protocolName = "okbrain.macos-agent.v3"
+  public static let supportedProtocolVersions = [protocolName]
   public static let defaultSocketPath = "/tmp/okbrain-macos-agent.sock"
   public static let defaultVersion = "2.0.0"
 

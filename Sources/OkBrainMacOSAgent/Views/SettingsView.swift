@@ -80,7 +80,7 @@ struct SettingsView: View {
               VStack(alignment: .leading, spacing: 4) {
                 Text("File Editing")
                   .font(.headline)
-                Text("Enables v2 fs.* RPCs. Access is still denied unless a File Permissions folder rule allows it.")
+                Text("Enables v3 fs.* RPCs. Access is still denied unless a File Permissions folder rule allows it.")
                   .font(.callout)
                   .foregroundStyle(.secondary)
               }

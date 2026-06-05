@@ -20,7 +20,7 @@ func runProtocolVerifier() throws {
     maxScreenshotBytes: 1024,
     maxRequestBytes: 1024
   )
-  let screenshot = CapturedImage(pngData: Data([0x89, 0x50, 0x4E, 0x47]), width: 64, height: 32)
+  let screenshot = CapturedImage(data: Data([0x52, 0x49, 0x46, 0x46]), mimeType: "image/webp", width: 64, height: 32)
   let handler = AgentRequestHandler(
     configuration: configuration,
     permissions: FakePermissionService(payload: .init(screenRecording: .granted, accessibility: .denied)),
@@ -40,22 +40,27 @@ func runProtocolVerifier() throws {
     "screenshot.full",
     "screenshot.window",
     "screenshot.region",
-    "screenshot.cursor"
+    "screenshot.cursor",
+    "screenshot.webp",
+    "screenshot.binary"
   ], "capabilities")
 
-  let capture: Envelope<ScreenshotCapturePayload> = try send(
+  let capture = try sendFrame(
     AgentRequest(
       id: "req_capture",
       action: "screenshot.capture",
-      params: AgentRequestParams(mode: "full", format: "png", includeCursor: false)
+      params: AgentRequestParams(mode: "full", format: "webp", includeCursor: false, quality: 80)
     ),
-    to: handler
+    to: handler,
+    as: ScreenshotCapturePayload.self
   )
-  expect(capture.ok, "capture response should be ok")
-  expectEqual(capture.data?.mimeType, "image/png", "capture mime type")
-  expectEqual(capture.data?.base64, screenshot.pngData.base64EncodedString(), "capture base64")
-  expectEqual(capture.data?.width, 64, "capture width")
-  expectEqual(capture.data?.height, 32, "capture height")
+  expect(capture.envelope.ok, "capture response should be ok")
+  expectEqual(capture.envelope.data?.mimeType, "image/webp", "capture mime type")
+  expectEqual(capture.envelope.data?.encoding, "binary", "capture encoding")
+  expectEqual(capture.envelope.data?.byteLength, screenshot.data.count, "capture byte length")
+  expectEqual(capture.bodyData, screenshot.data, "capture binary body")
+  expectEqual(capture.envelope.data?.width, 64, "capture width")
+  expectEqual(capture.envelope.data?.height, 32, "capture height")
 
   let deniedHandler = AgentRequestHandler(
     configuration: configuration,
@@ -66,7 +71,7 @@ func runProtocolVerifier() throws {
     AgentRequest(
       id: "req_denied",
       action: "screenshot.capture",
-      params: AgentRequestParams(mode: "full", format: "png", includeCursor: false)
+      params: AgentRequestParams(mode: "full", format: "webp", includeCursor: false, quality: 80)
     ),
     to: deniedHandler
   )
@@ -80,13 +85,6 @@ func runProtocolVerifier() throws {
   )
   expect(!wrongProtocol.ok, "wrong protocol should fail")
   expectEqual(wrongProtocol.error?.code, "protocol_mismatch", "protocol mismatch code")
-
-  let legacy: Envelope<ScreenshotCapturePayload> = try send(
-    AgentRequest(protocolName: nil, id: "legacy_1", action: "capture_full", params: nil),
-    to: handler
-  )
-  expect(legacy.ok, "legacy capture_full should be accepted")
-  expectEqual(legacy.id, "legacy_1", "legacy id")
 
   try runFileEditingVerifier(permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .unknown)))
 }
@@ -117,21 +115,21 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
   let handler = AgentRequestHandler(
     configuration: configuration,
     permissions: permissions,
-    screenshots: FakeScreenshotService(capturedImage: CapturedImage(pngData: Data([0x89, 0x50]), width: 1, height: 1))
+    screenshots: FakeScreenshotService(capturedImage: CapturedImage(data: Data([0x52, 0x49]), mimeType: "image/webp", width: 1, height: 1))
   )
 
   let status: Envelope<AgentStatusPayload> = try send(
-    AgentRequest(protocolName: AgentConfiguration.protocolV2Name, id: "fs_status", action: "agent.status", params: AgentRequestParams()),
+    AgentRequest(protocolName: AgentConfiguration.protocolName, id: "fs_status", action: "agent.status", params: AgentRequestParams()),
     to: handler
   )
-  expect(status.ok, "v2 status response should be ok")
-  expectEqual(status.protocolName, AgentConfiguration.protocolV2Name, "v2 status protocol")
-  expect(status.data?.capabilities.contains("fs.read") == true, "v2 status should expose fs.read")
+  expect(status.ok, "v3 status response should be ok")
+  expectEqual(status.protocolName, AgentConfiguration.protocolName, "binary status protocol")
+  expect(status.data?.capabilities.contains("fs.read") == true, "v3 status should expose fs.read")
   expectEqual(status.data?.fileEditing?.mode, .readWrite, "file editing mode")
 
   let workspace: Envelope<WorkspaceDescribePayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_workspace",
       action: "workspace.describe",
       params: AgentRequestParams(root: rootURL.path)
@@ -143,7 +141,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let write: Envelope<FileWritePayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_write",
       action: "fs.write",
       params: AgentRequestParams(
@@ -161,7 +159,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let read: Envelope<FileReadPayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_read",
       action: "fs.read",
       params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", startLine: 2, endLine: 2)
@@ -173,7 +171,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let patch: Envelope<FilePatchPayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_patch",
       action: "fs.patch",
       params: AgentRequestParams(
@@ -190,7 +188,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let freshReadAfterPatch: Envelope<FileReadPayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_read_after_patch",
       action: "fs.read",
       params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", startLine: 1, endLine: 4)
@@ -204,7 +202,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let overwrite: Envelope<FileWritePayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_write_overwrite",
       action: "fs.write",
       params: AgentRequestParams(
@@ -220,7 +218,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let freshReadAfterWrite: Envelope<FileReadPayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_read_after_write",
       action: "fs.read",
       params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", startLine: 1, endLine: 10)
@@ -234,7 +232,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let search: Envelope<FileSearchPayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_search",
       action: "fs.search",
       params: AgentRequestParams(root: rootURL.path, path: ".", glob: "*.txt", query: "return 42")
@@ -247,7 +245,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let fileSearch: Envelope<FileSearchPayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_search_file",
       action: "fs.search",
       params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", query: "inserted")
@@ -261,7 +259,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let list: Envelope<FileListPayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_list",
       action: "fs.list",
       params: AgentRequestParams(root: rootURL.path, path: ".", recursive: true, glob: "*.txt")
@@ -273,7 +271,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
 
   let escape: Envelope<EmptyPayload> = try send(
     AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "fs_escape",
       action: "fs.read",
       params: AgentRequestParams(root: rootURL.path, path: "../outside.txt")
@@ -290,9 +288,11 @@ func runSocketVerifier() throws {
   let stateLock = NSLock()
   var isRunning = false
   var latestSnapshot: SocketServerSnapshot?
+  let requestHeader = Data(#"{"protocol":"okbrain.macos-agent.v3","id":"req_socket","action":"agent.info"}"#.utf8)
+  let responseHeader = Data(#"{"protocol":"okbrain.macos-agent.v3","id":"req_socket","ok":true,"data":{"transport":"ssh-unix-socket-binary-frame"}}"#.utf8)
   let server = UnixSocketServer(socketPath: socketPath, maxRequestBytes: 1024) { requestData in
-    expectEqual(String(data: requestData, encoding: .utf8), #"{"action":"ping"}"#, "socket request data")
-    return Data(#"{"protocol":"okbrain.macos-agent.v1","id":"req_socket","ok":true,"data":{"pong":true}}"#.utf8)
+    expectEqual(requestData, requestHeader, "socket request frame header")
+    return (try? AgentBinaryFrame.encode(headerData: responseHeader)) ?? Data()
   }
 
   server.onStateChange = { snapshot in
@@ -327,16 +327,27 @@ func runSocketVerifier() throws {
   let fd = try connectUnixSocket(path: socketPath)
   defer { Darwin.close(fd) }
 
-  try writeAll(Data(#"{"action":"ping"}"#.utf8) + Data([0x0A]), to: fd)
-  let response = try readLine(from: fd)
+  try writeAll(try AgentBinaryFrame.encode(headerData: requestHeader), to: fd)
+  let responseFrame = try AgentBinaryFrame.decode(try readAll(from: fd))
+  let response = String(data: responseFrame.headerData, encoding: .utf8) ?? ""
   expect(response.contains(#""ok":true"#), "socket response ok")
-  expect(response.contains(#""pong":true"#), "socket response pong")
+  expect(response.contains(#""transport":"ssh-unix-socket-binary-frame""#), "socket response transport")
 }
 
 func send<T: Decodable>(_ request: AgentRequest, to handler: AgentRequestHandler) throws -> Envelope<T> {
+  try sendFrame(request, to: handler, as: T.self).envelope
+}
+
+func sendFrame<T: Decodable>(
+  _ request: AgentRequest,
+  to handler: AgentRequestHandler,
+  as type: T.Type
+) throws -> (envelope: Envelope<T>, bodyData: Data) {
   let requestData = try JSONEncoder().encode(request)
   let responseData = handler.handle(requestData: requestData)
-  return try JSONDecoder().decode(Envelope<T>.self, from: responseData)
+  let frame = try AgentBinaryFrame.decode(responseData)
+  let envelope = try JSONDecoder().decode(Envelope<T>.self, from: frame.headerData)
+  return (envelope, frame.bodyData)
 }
 
 func connectUnixSocket(path: String) throws -> Int32 {
@@ -385,12 +396,12 @@ func writeAll(_ data: Data, to fd: Int32) throws {
   }
 }
 
-func readLine(from fd: Int32) throws -> String {
+func readAll(from fd: Int32) throws -> Data {
   var data = Data()
-  var byte: UInt8 = 0
 
   while true {
-    let count = Darwin.read(fd, &byte, 1)
+    var buffer = [UInt8](repeating: 0, count: 8192)
+    let count = Darwin.read(fd, &buffer, buffer.count)
     if count == 0 {
       break
     }
@@ -399,14 +410,10 @@ func readLine(from fd: Int32) throws -> String {
       throw NSError(domain: "ProtocolVerifier", code: 3)
     }
 
-    if byte == 0x0A {
-      break
-    }
-
-    data.append(byte)
+    data.append(contentsOf: buffer.prefix(count))
   }
 
-  return String(data: data, encoding: .utf8) ?? ""
+  return data
 }
 
 struct FakePermissionService: PermissionChecking {

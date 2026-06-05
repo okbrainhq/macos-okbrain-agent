@@ -27,13 +27,6 @@ public final class AgentRequestHandler: @unchecked Sendable {
     "fs.search"
   ]
 
-  private let legacyActions: Set<String> = [
-    "ping",
-    "capture_full",
-    "capture_window",
-    "capture_region"
-  ]
-
   public init(
     configuration: AgentConfiguration,
     permissions: PermissionChecking = SystemPermissionService(),
@@ -52,7 +45,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
 
     do {
       guard !requestData.isEmpty else {
-        throw AgentProtocolError.invalidRequest("Request must be a single newline-delimited JSON object")
+        throw AgentProtocolError.invalidRequest("Request frame header must contain a JSON object")
       }
 
       let request = try JSONDecoder().decode(AgentRequest.self, from: requestData)
@@ -64,22 +57,15 @@ public final class AgentRequestHandler: @unchecked Sendable {
         throw AgentProtocolError.invalidRequest("Request action is required")
       }
 
-      if envelopeActions.contains(action) {
-        guard let protocolName = request.protocolName,
-              AgentConfiguration.supportedProtocolVersions.contains(protocolName) else {
-          throw AgentProtocolError.protocolMismatch("Expected protocol \(AgentConfiguration.protocolName) or \(AgentConfiguration.protocolV2Name)")
-        }
-        responseProtocol = protocolName
-      } else if fileActions.contains(action) {
-        guard request.protocolName == AgentConfiguration.protocolV2Name else {
-          throw AgentProtocolError.unsupportedProtocol("File editing actions require protocol \(AgentConfiguration.protocolV2Name)")
-        }
-        responseProtocol = AgentConfiguration.protocolV2Name
-      } else if legacyActions.contains(action) {
-        responseProtocol = AgentConfiguration.protocolName
-      } else {
+      guard envelopeActions.contains(action) || fileActions.contains(action) else {
         throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
       }
+
+      guard let protocolName = request.protocolName,
+            AgentConfiguration.supportedProtocolVersions.contains(protocolName) else {
+        throw AgentProtocolError.protocolMismatch("Expected protocol \(AgentConfiguration.protocolName)")
+      }
+      responseProtocol = protocolName
 
       switch action {
       case "agent.status":
@@ -92,7 +78,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
         return try capture(
           protocolName: responseProtocol,
           id: requestID,
-          params: request.params ?? AgentRequestParams(mode: "full", format: "png")
+          params: request.params ?? AgentRequestParams(mode: "full", format: "webp", quality: 80)
         )
       case "workspace.describe":
         return try encodeSuccess(
@@ -136,26 +122,6 @@ public final class AgentRequestHandler: @unchecked Sendable {
           id: requestID,
           data: fileEditing.search(request.params ?? AgentRequestParams())
         )
-      case "ping":
-        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: PingPayload(pong: true, version: configuration.version))
-      case "capture_full":
-        return try capture(
-          protocolName: responseProtocol,
-          id: requestID,
-          params: mergingLegacyMode("full", into: request.params)
-        )
-      case "capture_window":
-        return try capture(
-          protocolName: responseProtocol,
-          id: requestID,
-          params: mergingLegacyMode("window", into: request.params)
-        )
-      case "capture_region":
-        return try capture(
-          protocolName: responseProtocol,
-          id: requestID,
-          params: mergingLegacyMode("region", into: request.params)
-        )
       default:
         throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
       }
@@ -176,14 +142,16 @@ public final class AgentRequestHandler: @unchecked Sendable {
 
   private func errorResponseData(protocolName: String, id: String, error: AgentProtocolError) -> Data {
     do {
-      return try JSONEncoder().encode(ErrorEnvelope(
+      let headerData = try JSONEncoder().encode(ErrorEnvelope(
         protocolName: protocolName,
         id: id,
         error: ErrorPayload(code: error.code, message: error.message)
       ))
+      return try AgentBinaryFrame.encode(headerData: headerData)
     } catch {
       let fallback = "{\"protocol\":\"\(protocolName)\",\"id\":\"unknown\",\"ok\":false,\"error\":{\"code\":\"encode_failed\",\"message\":\"Unable to encode response\"}}"
-      return Data(fallback.utf8)
+      let headerData = Data(fallback.utf8)
+      return (try? AgentBinaryFrame.encode(headerData: headerData)) ?? headerData
     }
   }
 
@@ -194,11 +162,16 @@ public final class AgentRequestHandler: @unchecked Sendable {
     }
 
     let image = try screenshots.capture(params)
-    guard image.pngData.count <= configuration.maxScreenshotBytes else {
-      throw AgentProtocolError.responseTooLarge(image.pngData.count)
+    guard image.data.count <= configuration.maxScreenshotBytes else {
+      throw AgentProtocolError.responseTooLarge(image.data.count)
     }
 
-    return try encodeSuccess(protocolName: protocolName, id: id, data: ScreenshotCapturePayload(image: image))
+    return try encodeSuccess(
+      protocolName: protocolName,
+      id: id,
+      data: ScreenshotCapturePayload(image: image),
+      bodyData: image.data
+    )
   }
 
   private func statusPayload() -> AgentStatusPayload {
@@ -207,7 +180,9 @@ public final class AgentRequestHandler: @unchecked Sendable {
       "screenshot.full",
       "screenshot.window",
       "screenshot.region",
-      "screenshot.cursor"
+      "screenshot.cursor",
+      "screenshot.webp",
+      "screenshot.binary"
     ]
 
     if configuration.fileEditing.enabled {
@@ -250,17 +225,9 @@ public final class AgentRequestHandler: @unchecked Sendable {
       build: configuration.build,
       protocolName: AgentConfiguration.protocolName,
       socketPath: configuration.socketPath,
-      transport: "ssh-unix-socket",
+      transport: "ssh-unix-socket-binary-frame",
       protocolVersions: AgentConfiguration.supportedProtocolVersions
     )
-  }
-
-  private func mergingLegacyMode(_ mode: String, into params: AgentRequestParams?) -> AgentRequestParams {
-    var next = params ?? AgentRequestParams()
-    next.mode = mode
-    next.format = next.format ?? "png"
-    next.includeCursor = next.includeCursor ?? false
-    return next
   }
 
   private func normalizedID(_ id: String?) -> String {
@@ -268,12 +235,18 @@ public final class AgentRequestHandler: @unchecked Sendable {
     return trimmedID?.isEmpty == false ? trimmedID! : "req_\(UUID().uuidString)"
   }
 
-  private func encodeSuccess<T: Encodable>(protocolName: String, id: String, data: T) throws -> Data {
-    try JSONEncoder().encode(SuccessEnvelope(
+  private func encodeSuccess<T: Encodable>(
+    protocolName: String,
+    id: String,
+    data: T,
+    bodyData: Data = Data()
+  ) throws -> Data {
+    let headerData = try JSONEncoder().encode(SuccessEnvelope(
       protocolName: protocolName,
       id: id,
       data: data
     ))
+    return try AgentBinaryFrame.encode(headerData: headerData, bodyData: bodyData)
   }
 }
 

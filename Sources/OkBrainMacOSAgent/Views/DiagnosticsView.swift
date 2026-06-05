@@ -9,7 +9,7 @@ struct DiagnosticsView: View {
         GridRow {
           Text("Transport")
             .foregroundStyle(.secondary)
-          Text("ssh-unix-socket")
+          Text("ssh-unix-socket-binary-frame")
             .font(.callout.monospaced())
         }
 

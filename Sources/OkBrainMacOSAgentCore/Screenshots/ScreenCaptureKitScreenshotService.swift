@@ -7,12 +7,13 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
   public init() {}
 
   public func capture(_ params: AgentRequestParams) throws -> CapturedImage {
-    let format = (params.format ?? "png").lowercased()
-    guard format == "png" else {
-      throw AgentProtocolError.unsupportedFormat("Only PNG screenshot responses are currently supported")
+    let format = (params.format ?? "webp").lowercased()
+    guard format == "webp" else {
+      throw AgentProtocolError.unsupportedFormat("Only WebP screenshot responses are supported")
     }
 
     let includeCursor = params.includeCursor ?? false
+    let webPQuality = params.quality ?? 80
 
     let image: CGImage
     switch (params.mode ?? "full").lowercased() {
@@ -29,11 +30,8 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
       throw AgentProtocolError.unsupportedMode("Unsupported screenshot mode: \(mode)")
     }
 
-    guard let pngData = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
-      throw AgentProtocolError.captureFailed("Unable to encode screenshot as PNG")
-    }
-
-    return CapturedImage(pngData: pngData, width: image.width, height: image.height)
+    let webPData = try CWebPEncoder(quality: webPQuality).encode(image)
+    return CapturedImage(data: webPData, mimeType: "image/webp", width: image.width, height: image.height)
   }
 
   private func captureFullScreen(includeCursor: Bool) throws -> CGImage {

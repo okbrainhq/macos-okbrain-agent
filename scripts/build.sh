@@ -36,6 +36,37 @@ cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 /usr/bin/swift "$ROOT_DIR/scripts/generate_app_icon.swift" "$APP_ICON" "$MENU_BAR_SYMBOL"
 
+WEBP_VERSION="1.5.0"
+case "$(uname -m)" in
+    arm64)
+        WEBP_ARCH="mac-arm64"
+        ;;
+    x86_64)
+        WEBP_ARCH="mac-x86-64"
+        ;;
+    *)
+        WEBP_ARCH=""
+        ;;
+esac
+
+VENDORED_CWEBP=""
+if [ -n "$WEBP_ARCH" ]; then
+    VENDORED_CWEBP="$ROOT_DIR/vendor/libwebp/$WEBP_VERSION/$WEBP_ARCH/bin/cwebp"
+fi
+
+CWEBP_SOURCE="${MACOS_AGENT_CWEBP_PATH:-}"
+if [ -z "$CWEBP_SOURCE" ] && [ -n "$VENDORED_CWEBP" ] && [ -x "$VENDORED_CWEBP" ]; then
+    CWEBP_SOURCE="$VENDORED_CWEBP"
+fi
+
+if [ -n "$CWEBP_SOURCE" ] && [ -x "$CWEBP_SOURCE" ]; then
+    cp "$CWEBP_SOURCE" "$APP_RESOURCES/cwebp"
+    chmod +x "$APP_RESOURCES/cwebp"
+    echo "Bundled cwebp from $CWEBP_SOURCE"
+else
+    echo "Warning: cwebp not bundled; expected $VENDORED_CWEBP or set MACOS_AGENT_CWEBP_PATH."
+fi
+
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

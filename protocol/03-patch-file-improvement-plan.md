@@ -41,7 +41,7 @@ Also, `swift test` currently has no XCTest/Swift Testing targets, and `./scripts
 ## Design Goals
 
 - Match Python patch behavior closely enough that Brain tools have identical UX on macOS and non-macOS hosts.
-- Keep the existing v2 protocol stable unless richer diagnostics are intentionally added.
+- Keep the existing v3 protocol stable unless richer diagnostics are intentionally added.
 - Keep patching transactional: all edits succeed in memory before any disk write.
 - Keep path safety, SHA conflict checks, max-size checks, backup, dry-run, and atomic writes unchanged.
 - Make the patch algorithm independently testable.
@@ -212,7 +212,7 @@ Core test cases:
 ### Phase 5: Optional Follow-Ups
 
 - Add structured patch diagnostics to logs.
-- Add changed range metadata to the protocol in a future v2 extension.
+- Add changed range metadata to the protocol in a future v3 extension.
 - Add fuzz/property tests comparing Swift output against the Python reference for generated whitespace/newline cases.
 
 ## Acceptance Criteria

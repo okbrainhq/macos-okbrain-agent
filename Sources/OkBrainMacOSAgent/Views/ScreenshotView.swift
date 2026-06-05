@@ -52,7 +52,7 @@ struct ScreenshotView: View {
         ContentUnavailableView(
           "No Screenshot",
           systemImage: "camera.viewfinder",
-          description: Text("Run a capture probe to preview the PNG returned by the socket protocol.")
+          description: Text("Run a capture probe to preview the binary WebP returned by the socket protocol.")
         )
         .frame(maxWidth: .infinity, minHeight: 300)
       }

@@ -1,6 +1,6 @@
-# 🖥️ macOS Agent v2 — File Editing Capability Spec
+# 🖥️ macOS Agent v3 — File Editing Capability Spec
 
-**Status:** Proposed v2 spec  
+**Status:** Implemented v3 binary-frame extension  
 **Date:** 2026-06-05  
 **Scope:** Code Project macOS agent file editing support over the existing SSH → Unix socket transport  
 **Extends:** `protocol/01-macos-agent-ssh-socks-protocol.md`
@@ -11,7 +11,7 @@
 
 Add **file editing features** to the separate macOS agent so Brain can use the agent for Code Project file tasks on macOS hosts, not only screenshots.
 
-The v2 agent should support the existing coding tool workflow:
+The v3 agent supports the existing coding tool workflow:
 
 - `read_file`
 - `write_file`
@@ -19,7 +19,7 @@ The v2 agent should support the existing coding tool workflow:
 - `list_files`
 - `search_files`
 
-Brain should keep the same user-facing tool names and choose the macOS agent as an implementation path when the host is Darwin, the v2 agent is reachable, and the project root is allowed.
+Brain should keep the same user-facing tool names and choose the macOS agent as an implementation path when the host is Darwin, the v3 agent is reachable, and the project root is allowed.
 
 ---
 
@@ -27,10 +27,10 @@ Brain should keep the same user-facing tool names and choose the macOS agent as 
 
 - **Same transport:** keep `Brain server → SSH StreamLocal forwarding → remote Unix socket → macOS agent`.
 - **No arbitrary shell:** file editing RPCs must not execute user-provided shell commands.
-- **Backward compatible:** screenshot v1 remains valid; v2 adds file capabilities.
+- **Single protocol:** file editing and screenshots share `okbrain.macos-agent.v3` binary frames; no v1/v2 compatibility is required.
 - **Project-root scoped:** every file operation must be constrained to an allowed Code Project root.
 - **Safe by default:** canonicalize paths, prevent `..` traversal, enforce limits, and use optimistic conflict checks for writes.
-- **Fallback friendly:** if v2 file editing is unavailable, Brain can fall back to the existing SSH coding tools.
+- **Fallback friendly:** if v3 file editing is unavailable, Brain can fall back to the existing SSH coding tools.
 
 ---
 
@@ -46,13 +46,13 @@ Brain should keep the same user-facing tool names and choose the macOS agent as 
 
 ## 📦 Protocol Envelope
 
-Use newline-delimited JSON, one request and one response per line.
+Use the `OKB1` binary frame defined in `protocol/01-macos-agent-ssh-socks-protocol.md`. File-editing requests/responses put JSON in the frame header and use `bodyLength: 0`.
 
 ### Request
 
 ```json
 {
-  "protocol": "okbrain.macos-agent.v2",
+  "protocol": "okbrain.macos-agent.v3",
   "id": "req_01HZ...",
   "action": "fs.read",
   "params": {}
@@ -63,7 +63,7 @@ Use newline-delimited JSON, one request and one response per line.
 
 ```json
 {
-  "protocol": "okbrain.macos-agent.v2",
+  "protocol": "okbrain.macos-agent.v3",
   "id": "req_01HZ...",
   "ok": true,
   "data": {}
@@ -74,7 +74,7 @@ Use newline-delimited JSON, one request and one response per line.
 
 ```json
 {
-  "protocol": "okbrain.macos-agent.v2",
+  "protocol": "okbrain.macos-agent.v3",
   "id": "req_01HZ...",
   "ok": false,
   "error": {
@@ -90,7 +90,7 @@ Use newline-delimited JSON, one request and one response per line.
 
 ### `agent.status`
 
-Brain should call `agent.status` first and prefer v2 only when file capabilities are present.
+Brain should call `agent.status` first and prefer the macOS agent only when v3 file capabilities are present.
 
 Expected `data`:
 
@@ -101,7 +101,7 @@ Expected `data`:
   "available": true,
   "version": "2.0.0",
   "socketPath": "/tmp/okbrain-macos-agent.sock",
-  "protocolVersions": ["okbrain.macos-agent.v1", "okbrain.macos-agent.v2"],
+  "protocolVersions": ["okbrain.macos-agent.v3"],
   "capabilities": [
     "screenshot.full",
     "screenshot.window",
@@ -173,7 +173,7 @@ Verifies that a Code Project root is allowed and returns root metadata.
 
 ```json
 {
-  "protocol": "okbrain.macos-agent.v2",
+  "protocol": "okbrain.macos-agent.v3",
   "id": "req_workspace_1",
   "action": "workspace.describe",
   "params": {
@@ -448,7 +448,7 @@ Add a Brain-side execution context for Darwin Code Projects:
 
 ```text
 CodeProjectExecutionContext
-  ├─ MacOSAgentFileExecutionContext when v2 fs capabilities are available and root is allowed
+  ├─ MacOSAgentFileExecutionContext when v3 fs capabilities are available and root is allowed
   └─ Existing SSH execution fallback otherwise
 ```
 
@@ -462,11 +462,11 @@ User-facing tool names stay unchanged:
 
 ### Suggested Key Files
 
-- `src/lib/code-project-macos-agent.ts` — v2 socket RPC client and capability checks.
+- `src/lib/code-project-macos-agent.ts` — v3 binary-frame socket RPC client and capability checks.
 - `src/lib/ai/tools/coding-tools.ts` — choose macOS agent file context when eligible.
-- `src/app/api/code-projects/[id]/check-macos-agent/route.ts` — include v2 file capability data.
+- `src/app/api/code-projects/[id]/check-macos-agent/route.ts` — include v3 file capability data.
 - `src/app/(main)/code-project/[id]/page.tsx` — show File Editing status under macOS Agent settings.
-- `e2e/mock-macos-agent.py` — add v2 file action mocks.
+- `e2e/mock-macos-agent.py` — add v3 binary-frame file action mocks.
 - `e2e/code-project-macos-agent-files.spec.ts` — focused E2E coverage.
 
 ### Settings UI
@@ -485,7 +485,7 @@ For Darwin Code Projects, show:
 
 | Code | Meaning |
 | --- | --- |
-| `unsupported_protocol` | Agent does not support v2. |
+| `unsupported_protocol` | Agent does not support v3. |
 | `unsupported_action` | Action is unknown or disabled. |
 | `invalid_request` | Malformed params. |
 | `root_required` | Missing `root`. |
@@ -519,13 +519,13 @@ For Darwin Code Projects, show:
 
 Use `TEST_MODE=true` plus `e2e/mock-macos-agent.py`.
 
-- Darwin Code Project detects v2 file capabilities.
+- Darwin Code Project detects v3 file capabilities.
 - `read_file` routes through macOS agent when root is allowed.
 - `write_file` creates/overwrites files and returns updated SHA.
 - `patch_file` applies exact replacement and conflict detection.
 - `list_files` and `search_files` return root-scoped results.
 - Root escape attempts are denied.
-- When v2 agent is unavailable, coding tools fall back to existing SSH execution.
+- When v3 agent is unavailable, coding tools fall back to existing SSH execution.
 
 Focused command:
 
@@ -539,8 +539,8 @@ npm run test:e2e -- e2e/code-project-macos-agent-files.spec.ts --reporter=line
 
 | Phase | Work | Priority |
 | --- | --- | --- |
-| P0 | Define v2 protocol and mock agent support. | Must |
-| P0 | Add Brain v2 status/capability detection. | Must |
+| P0 | Define v3 protocol and mock agent support. | Must |
+| P0 | Add Brain v3 status/capability detection. | Must |
 | P0 | Implement `fs.read`, `fs.write`, `fs.patch`, `fs.list`, `fs.search`. | Must |
 | P0 | Add fallback to existing SSH coding tools. | Must |
 | P1 | Add macOS app UI for approved folder rules and read/write mode. | Done |
@@ -553,6 +553,6 @@ npm run test:e2e -- e2e/code-project-macos-agent-files.spec.ts --reporter=line
 ## ❓ Open Questions
 
 1. Should each Code Project root require explicit approval in the macOS app UI, or can Brain request approval from the app on first use?
-2. Should the agent expose binary read/write in v2, or keep v2 text-only and add binary support later?
+2. Should the agent expose binary read/write in v3, or keep v3 text-only and add binary support later?
 3. Should sensitive files like `.env` be editable by default inside an approved root, or require an additional root policy flag?
-4. Should Brain cache v2 capability checks per chat session, per Code Project, or per tool call?
+4. Should Brain cache v3 capability checks per chat session, per Code Project, or per tool call?

@@ -31,6 +31,7 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
   public var mode: String?
   public var format: String?
   public var includeCursor: Bool?
+  public var quality: Int?
   public var appName: String?
   public var windowId: UInt32?
   public var rect: CaptureRect?
@@ -62,6 +63,7 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     mode: String? = nil,
     format: String? = nil,
     includeCursor: Bool? = nil,
+    quality: Int? = nil,
     appName: String? = nil,
     windowId: UInt32? = nil,
     rect: CaptureRect? = nil,
@@ -90,6 +92,7 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     self.mode = mode
     self.format = format
     self.includeCursor = includeCursor
+    self.quality = quality
     self.appName = appName
     self.windowId = windowId
     self.rect = rect
@@ -120,6 +123,7 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     case mode
     case format
     case includeCursor
+    case quality
     case appName
     case windowId
     case rect
@@ -151,6 +155,7 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     mode = try container.decodeIfPresent(String.self, forKey: .mode)
     format = try container.decodeIfPresent(String.self, forKey: .format)
     includeCursor = try container.decodeIfPresent(Bool.self, forKey: .includeCursor)
+    quality = try container.decodeIfPresent(Int.self, forKey: .quality)
     appName = try container.decodeIfPresent(String.self, forKey: .appName)
     rect = try container.decodeIfPresent(CaptureRect.self, forKey: .rect)
     root = try container.decodeIfPresent(String.self, forKey: .root)
@@ -215,12 +220,14 @@ public struct CaptureRect: Codable, Equatable, Sendable {
 }
 
 public struct CapturedImage: Equatable, Sendable {
-  public let pngData: Data
+  public let data: Data
+  public let mimeType: String
   public let width: Int
   public let height: Int
 
-  public init(pngData: Data, width: Int, height: Int) {
-    self.pngData = pngData
+  public init(data: Data, mimeType: String = "image/webp", width: Int, height: Int) {
+    self.data = data
+    self.mimeType = mimeType
     self.width = width
     self.height = height
   }
@@ -228,13 +235,15 @@ public struct CapturedImage: Equatable, Sendable {
 
 public struct ScreenshotCapturePayload: Codable, Equatable, Sendable {
   public let mimeType: String
-  public let base64: String
+  public let encoding: String
+  public let byteLength: Int
   public let width: Int
   public let height: Int
 
   public init(image: CapturedImage) {
-    mimeType = "image/png"
-    base64 = image.pngData.base64EncodedString()
+    mimeType = image.mimeType
+    encoding = "binary"
+    byteLength = image.data.count
     width = image.width
     height = image.height
   }

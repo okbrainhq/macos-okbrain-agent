@@ -15,7 +15,7 @@ enum PermissionRuleEngineTests {
     try serviceAllowsReadsAndDeniesWritesForReadRule()
     try serviceAllowsNestedWriteOverride()
     try serviceDeniesWriteWhenNestedReadOverridesParentWrite()
-    try statusKeepsLegacyAllowedRootsEmptyAndReportsPermissionRules()
+    try statusKeepsAllowedRootsEmptyAndReportsPermissionRules()
     print("✅ Permission rule engine + integration tests passed")
   }
 
@@ -227,7 +227,7 @@ enum PermissionRuleEngineTests {
     }
   }
 
-  private static func statusKeepsLegacyAllowedRootsEmptyAndReportsPermissionRules() throws {
+  private static func statusKeepsAllowedRootsEmptyAndReportsPermissionRules() throws {
     let fixture = try TemporaryDirectory()
     defer { fixture.remove() }
     let projects = try fixture.makeDirectory("Projects")
@@ -239,18 +239,19 @@ enum PermissionRuleEngineTests {
     ))
     let handler = AgentRequestHandler(configuration: configuration, permissions: StubPermissionService())
     let request = AgentRequest(
-      protocolName: AgentConfiguration.protocolV2Name,
+      protocolName: AgentConfiguration.protocolName,
       id: "status-test",
       action: "agent.status"
     )
     let responseData = handler.handle(requestData: try JSONEncoder().encode(request))
-    let response = try JSONSerialization.jsonObject(with: responseData) as? [String: Any]
+    let responseFrame = try AgentBinaryFrame.decode(responseData)
+    let response = try JSONSerialization.jsonObject(with: responseFrame.headerData) as? [String: Any]
     let data = response?["data"] as? [String: Any]
     let fileEditing = data?["fileEditing"] as? [String: Any]
     let allowedRoots = fileEditing?["allowedRoots"] as? [[String: Any]]
     let permissionRules = fileEditing?["permissionRules"] as? [[String: Any]]
 
-    try expect(allowedRoots?.isEmpty == true, "Expected legacy status allowedRoots to stay empty for client compatibility")
+    try expect(allowedRoots?.isEmpty == true, "Expected status allowedRoots to stay empty")
     try expect(permissionRules?.count == 1, "Expected status to report one native permission rule")
     try expect(permissionRules?.first?["path"] as? String == projectsPath, "Expected status permissionRules to include configured rule path")
   }

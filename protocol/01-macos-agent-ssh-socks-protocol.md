@@ -1,7 +1,8 @@
-# 🖥️ macOS Agent .sock Protocol over SSH
+# 🖥️ macOS Agent `.sock` Protocol over SSH
 
-**Status:** Proposed socket-only protocol for the separate macOS agent app  
-**Date:** 2026-06-02  
+**Status:** Implemented socket-only binary-frame protocol for the separate macOS agent app  
+**Date:** 2026-06-05  
+**Protocol:** `okbrain.macos-agent.v3`  
 **Scope:** Brain Code Project screenshot/control access to a macOS GUI session
 
 ---
@@ -15,7 +16,7 @@ Brain should **not install, update, or manage** the macOS GUI agent. A separate 
 - Running in the logged-in GUI session
 - Creating and serving a local Unix domain socket (`.sock`)
 
-Brain only detects and calls that `.sock` through the existing Code Project SSH connection.
+Brain detects and calls that `.sock` through the existing Code Project SSH connection.
 
 ---
 
@@ -35,24 +36,13 @@ Brain server → SSH → remote Unix domain socket → macOS GUI app/agent
 
 ### Can Brain access a remote `.sock` via SSH?
 
-Yes. SSH does not magically expose the remote Unix socket, but OpenSSH can bridge it with StreamLocal forwarding:
+Yes. SSH can bridge the remote Unix socket with StreamLocal forwarding:
 
 ```bash
 ssh -N -L /tmp/okbrain-local.sock:/tmp/okbrain-macos-agent.sock user@mac
 ```
 
-Brain then connects to `/tmp/okbrain-local.sock` locally and sends the v1 JSON request. Current Brain code opens this forwarding socket briefly per request and closes it after the response. This is **not SOCKS**; SOCKS is a TCP proxy and does not directly address a Unix domain socket.
-
----
-
-## 🧭 Roles
-
-| Component | Responsibility |
-| --- | --- |
-| Brain server | Stores Code Project SSH host, checks status, invokes screenshot requests, uploads processed images |
-| SSH transport | Secure path from Brain to the Mac; no public agent port required |
-| macOS app / agent | Runs in GUI user session, owns the `.sock`, captures screen, returns protocol responses |
-| Unix socket | User-owned local IPC endpoint, e.g. `/tmp/okbrain-macos-agent.sock` |
+Brain then connects to `/tmp/okbrain-local.sock` locally and sends one binary-framed request per connection. This is **not SOCKS**; SOCKS is a TCP proxy and does not directly address a Unix domain socket.
 
 ---
 
@@ -75,39 +65,58 @@ Rules:
 - The socket must be owned by the logged-in GUI user.
 - Permissions should be `0600`.
 - The GUI app must remove stale socket files before binding.
-- The socket must speak newline-delimited JSON: one request, one response.
+- The socket speaks one **binary frame request** and one **binary frame response** per connection.
 
 ---
 
-## 📦 JSON Envelope
+## 📦 Binary Frame
 
-### Request
+All requests and responses use this frame layout:
+
+```text
+0..3    magic          ASCII "OKB1"
+4..7    headerLength   uint32 big-endian
+8..15   bodyLength     uint64 big-endian
+16..N   header JSON    UTF-8 JSON, exactly headerLength bytes
+N..end  body bytes     exactly bodyLength bytes
+```
+
+### Request Frame
+
+- `bodyLength` is currently `0`.
+- The header JSON contains the RPC request.
 
 ```json
 {
-  "protocol": "okbrain.macos-agent.v1",
+  "protocol": "okbrain.macos-agent.v3",
   "id": "req_01HZ...",
   "action": "agent.status",
   "params": {}
 }
 ```
 
-### Success Response
+### Success Response Frame
+
+- The response header JSON contains the envelope.
+- For non-binary actions, `bodyLength` is `0`.
+- For `screenshot.capture`, the body is raw WebP bytes.
 
 ```json
 {
-  "protocol": "okbrain.macos-agent.v1",
+  "protocol": "okbrain.macos-agent.v3",
   "id": "req_01HZ...",
   "ok": true,
   "data": {}
 }
 ```
 
-### Error Response
+### Error Response Frame
+
+Errors have `bodyLength: 0`.
 
 ```json
 {
-  "protocol": "okbrain.macos-agent.v1",
+  "protocol": "okbrain.macos-agent.v3",
   "id": "req_01HZ...",
   "ok": false,
   "error": {
@@ -132,42 +141,58 @@ Expected `data`:
   "installed": true,
   "running": true,
   "available": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "socketPath": "/tmp/okbrain-macos-agent.sock",
+  "protocolVersions": ["okbrain.macos-agent.v3"],
   "permissions": {
     "screenRecording": "granted",
     "accessibility": "unknown"
   },
-  "capabilities": ["screenshot.full", "screenshot.window", "screenshot.region", "screenshot.cursor"]
+  "capabilities": [
+    "screenshot.full",
+    "screenshot.window",
+    "screenshot.region",
+    "screenshot.cursor",
+    "screenshot.webp",
+    "screenshot.binary"
+  ]
 }
 ```
 
 ### `screenshot.capture`
 
-Captures the GUI and returns image bytes as base64 PNG. Brain converts/uploads it to WebP and stores only `/uploads/<id>.webp` in chat/tool events.
+Captures the GUI, converts it locally to **lossy WebP quality 80** via the bundled official libwebp `cwebp` 1.5.0 binary, and returns raw WebP bytes in the binary response body. The app resolves `cwebp` from `MACOS_AGENT_CWEBP_PATH`, the app bundle resources, or the vendored repo path during source runs.
 
 ```json
 {
-  "protocol": "okbrain.macos-agent.v1",
+  "protocol": "okbrain.macos-agent.v3",
   "id": "req_capture_1",
   "action": "screenshot.capture",
   "params": {
     "mode": "full",
-    "format": "png",
+    "format": "webp",
+    "quality": 80,
     "includeCursor": false
   }
 }
 ```
 
-Expected `data`:
+Response header `data`:
 
 ```json
 {
-  "mimeType": "image/png",
-  "base64": "iVBORw0KGgo...",
+  "mimeType": "image/webp",
+  "encoding": "binary",
+  "byteLength": 123456,
   "width": 3024,
   "height": 1964
 }
+```
+
+Response body:
+
+```text
+<exactly byteLength raw WebP bytes>
 ```
 
 Modes:
@@ -184,7 +209,13 @@ Returns permission state without attempting capture.
 
 ### `agent.info`
 
-Returns version/build details for diagnostics.
+Returns version/build details for diagnostics. Expected transport is:
+
+```json
+{
+  "transport": "ssh-unix-socket-binary-frame"
+}
+```
 
 ---
 
@@ -194,10 +225,10 @@ Returns version/build details for diagnostics.
 - The macOS agent must bind only to a user-owned Unix socket.
 - The web app must not run arbitrary installer scripts on the Mac.
 - Brain must use a fixed socket bridge command, not arbitrary user-provided shell.
-- Enforce response size limits for screenshots.
+- Enforce response body size limits for screenshots.
 - Time out screenshot calls quickly, default 15 seconds.
-- Never store screenshot base64 in SQLite chat events.
-- Store uploaded screenshots as processed WebP files and expose only `/uploads/...` URLs.
+- Never store screenshot binary payloads in SQLite chat events.
+- Store uploaded screenshots as WebP files and expose only `/uploads/...` URLs.
 
 ---
 
@@ -205,20 +236,7 @@ Returns version/build details for diagnostics.
 
 - Settings page shows a **macOS Agent Installed / Not Installed** status button for Darwin Code Projects.
 - Status button calls `GET /api/code-projects/:id/check-macos-agent`.
-- Status response includes `transport: "ssh-unix-socket"` and `socketPath`.
-- Screenshot test captures through the `.sock` protocol, processes the PNG, uploads WebP, and returns `fileUri`.
-- Chat tool result stores `fileUri`, `mimeType`, and `description`; it must not persist raw base64.
-- Mock socket daemon remains valid for TEST_MODE until the standalone macOS app exists.
-
----
-
-## ✅ Current Compatibility Mapping
-
-The current prototype socket server still accepts legacy action names:
-
-- `ping`
-- `capture_full`
-- `capture_window`
-- `capture_region`
-
-Brain now sends the v1 JSON envelope to the `.sock` first and only falls back to those legacy action names for compatibility. The standalone macOS app should implement the v1 envelope directly on its `.sock` endpoint.
+- Status response includes `transport: "ssh-unix-socket-binary-frame"` and `socketPath`.
+- Screenshot test captures through the `.sock` protocol, receives WebP bytes directly, uploads/stores them, and returns `fileUri`.
+- Chat tool result stores `fileUri`, `mimeType`, and `description`; it must not persist raw image bytes.
+- Mock socket daemon must emit/parse `OKB1` binary frames.

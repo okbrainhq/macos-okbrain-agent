@@ -214,7 +214,7 @@ final class AgentRuntimeStore: ObservableObject {
     let request = AgentRequest(
       id: "gui_capture_probe",
       action: "screenshot.capture",
-      params: AgentRequestParams(mode: "full", format: "png", includeCursor: false)
+      params: AgentRequestParams(mode: "full", format: "webp", includeCursor: false, quality: 80)
     )
 
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -229,7 +229,9 @@ final class AgentRuntimeStore: ObservableObject {
         )
       }
 
-      let responseText = String(data: responseData, encoding: .utf8) ?? ""
+      let responseFrame = try? AgentBinaryFrame.decode(responseData)
+      let responseHeaderData = responseFrame?.headerData ?? responseData
+      let responseText = String(data: responseHeaderData, encoding: .utf8) ?? ""
 
       DispatchQueue.main.async {
         let preview = Self.preview(from: responseData)
@@ -320,11 +322,13 @@ final class AgentRuntimeStore: ObservableObject {
 
   private static func preview(from responseData: Data) -> ScreenshotPreview? {
     guard
-      let envelope = try? JSONDecoder().decode(CaptureProbeEnvelope.self, from: responseData),
+      let frame = try? AgentBinaryFrame.decode(responseData),
+      let envelope = try? JSONDecoder().decode(CaptureProbeEnvelope.self, from: frame.headerData),
       envelope.ok,
       let payload = envelope.data,
-      let imageData = Data(base64Encoded: payload.base64),
-      let image = NSImage(data: imageData)
+      payload.encoding == "binary",
+      payload.byteLength == frame.bodyData.count,
+      let image = NSImage(data: frame.bodyData)
     else {
       return nil
     }

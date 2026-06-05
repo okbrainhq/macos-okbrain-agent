@@ -201,8 +201,7 @@ public final class UnixSocketServer {
         return
       }
 
-      var responseData = requestHandler(requestData)
-      responseData.append(0x0A)
+      let responseData = requestHandler(requestData)
       try write(responseData, to: clientFD)
     } catch {
       return
@@ -210,13 +209,41 @@ public final class UnixSocketServer {
   }
 
   private func readRequest(from fd: Int32) throws -> Data {
-    var data = Data()
-    var byte: UInt8 = 0
+    guard let prelude = try readExact(AgentBinaryFrame.preludeByteCount, from: fd, allowEmptyEOF: true) else {
+      return Data()
+    }
 
-    while data.count < maxRequestBytes {
-      let bytesRead = Darwin.read(fd, &byte, 1)
+    let lengths = try AgentBinaryFrame.decodePrelude(prelude)
+    guard lengths.headerByteCount <= maxRequestBytes,
+          lengths.bodyByteCount <= maxRequestBytes - lengths.headerByteCount else {
+      throw AgentProtocolError.invalidRequest("Request frame exceeds \(maxRequestBytes) bytes")
+    }
+
+    let headerData = try readExact(lengths.headerByteCount, from: fd, allowEmptyEOF: false) ?? Data()
+    if lengths.bodyByteCount > 0 {
+      _ = try readExact(lengths.bodyByteCount, from: fd, allowEmptyEOF: false)
+      throw AgentProtocolError.invalidRequest("Request frame body is not supported")
+    }
+
+    return headerData
+  }
+
+  private func readExact(_ byteCount: Int, from fd: Int32, allowEmptyEOF: Bool) throws -> Data? {
+    guard byteCount > 0 else {
+      return Data()
+    }
+
+    var data = Data()
+    data.reserveCapacity(byteCount)
+
+    while data.count < byteCount {
+      var buffer = [UInt8](repeating: 0, count: min(8192, byteCount - data.count))
+      let bytesRead = Darwin.read(fd, &buffer, buffer.count)
       if bytesRead == 0 {
-        return data
+        if allowEmptyEOF && data.isEmpty {
+          return nil
+        }
+        throw AgentProtocolError.socketError("read failed: unexpected EOF")
       }
 
       if bytesRead < 0 {
@@ -226,14 +253,10 @@ public final class UnixSocketServer {
         throw AgentProtocolError.socketError("read failed: \(String(cString: strerror(errno)))")
       }
 
-      if byte == 0x0A {
-        return data
-      }
-
-      data.append(byte)
+      data.append(contentsOf: buffer.prefix(bytesRead))
     }
 
-    throw AgentProtocolError.invalidRequest("Request exceeds \(maxRequestBytes) bytes")
+    return data
   }
 
   private func write(_ data: Data, to fd: Int32) throws {
