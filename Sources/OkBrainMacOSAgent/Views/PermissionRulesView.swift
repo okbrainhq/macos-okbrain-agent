@@ -27,8 +27,11 @@ struct PermissionRulesView: View {
           .padding(4)
         }
 
-        GroupBox("Add Rule") {
+        GroupBox {
           VStack(alignment: .leading, spacing: 12) {
+            Text("Add Rule")
+              .font(.headline)
+
             HStack(spacing: 10) {
               TextField("/absolute/folder/path", text: $newRulePath)
                 .textFieldStyle(.roundedBorder)

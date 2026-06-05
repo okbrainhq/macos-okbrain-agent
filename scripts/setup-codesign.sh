@@ -13,9 +13,92 @@ set -euo pipefail
 CERT_NAME="OkBrain Dev"
 KEYCHAIN="$HOME/Library/Keychains/okbrain.keychain-db"
 KEYCHAIN_PASS="okbrain"
-CERT_PEM="/tmp/okbrain_cert.pem"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CERT_PEM="$(mktemp /tmp/okbrain_cert.XXXXXX.pem)"
+KEY_PEM="$(mktemp /tmp/okbrain_key.XXXXXX.pem)"
+P12_FILE="$(mktemp /tmp/okbrain.XXXXXX.p12)"
+
+cleanup() {
+    rm -f "$CERT_PEM" "$KEY_PEM" "$P12_FILE"
+}
+trap cleanup EXIT
+
+find_okbrain_identity() {
+    security find-identity -v -p codesigning "$KEYCHAIN" 2>/dev/null | awk -v name="$CERT_NAME" '
+        $2 ~ /^[[:xdigit:]]{40}$/ && index($0, "\"" name "\"") { print $2; exit }
+    '
+}
+
+add_keychain_to_search_list() {
+    local keychain
+    local found="false"
+    local existing=()
+
+    while IFS= read -r keychain; do
+        [ -n "$keychain" ] || continue
+        existing+=("$keychain")
+        if [ "$keychain" = "$KEYCHAIN" ]; then
+            found="true"
+        fi
+    done < <(security list-keychains -d user 2>/dev/null | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
+
+    if [ "${#existing[@]}" -eq 0 ]; then
+        existing=("$HOME/Library/Keychains/login.keychain-db")
+    fi
+
+    if [ "$found" = "false" ]; then
+        security list-keychains -d user -s "${existing[@]}" "$KEYCHAIN"
+    fi
+}
+
+delete_stale_certificates() {
+    while security find-certificate -c "$CERT_NAME" "$KEYCHAIN" >/dev/null 2>&1; do
+        security delete-certificate -c "$CERT_NAME" "$KEYCHAIN" >/dev/null 2>&1 || break
+    done
+}
+
+trust_certificate() {
+    echo "→ Trusting certificate for code signing..."
+    security add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$CERT_PEM" 2>/dev/null || \
+        sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$CERT_PEM"
+}
+
+allow_codesign_access() {
+    echo "→ Allowing codesign to access the keychain..."
+    security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null 2>&1 || true
+}
+
+create_identity() {
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "❌  openssl is required to create the code-signing identity."
+        exit 1
+    fi
+
+    echo "→ Creating self-signed certificate '$CERT_NAME' with openssl..."
+
+    openssl req -x509 -newkey rsa:2048 \
+        -keyout "$KEY_PEM" \
+        -out "$CERT_PEM" \
+        -days 3650 -nodes \
+        -subj "/CN=$CERT_NAME" \
+        -addext "basicConstraints = critical, CA:TRUE" \
+        -addext "keyUsage = critical, digitalSignature, keyCertSign" \
+        -addext "extendedKeyUsage = codeSigning" >/dev/null 2>&1
+
+    openssl pkcs12 -export \
+        -out "$P12_FILE" \
+        -inkey "$KEY_PEM" \
+        -in "$CERT_PEM" \
+        -name "$CERT_NAME" \
+        -passout pass:"$KEYCHAIN_PASS" >/dev/null 2>&1
+
+    security import "$P12_FILE" \
+        -f pkcs12 \
+        -k "$KEYCHAIN" \
+        -P "$KEYCHAIN_PASS" \
+        -T /usr/bin/codesign >/dev/null
+}
 
 echo "🔐  OkBrain Code Signing Setup"
 echo ""
@@ -31,136 +114,34 @@ else
     security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
 fi
 
-# 2. Add keychain to search list
-security list-keychains -s "$HOME/Library/Keychains/login.keychain-db" "$KEYCHAIN"
+# 2. Add keychain to search list without clobbering the user's existing list.
+add_keychain_to_search_list
 
-# 3. Create self-signed certificate using certtool (automated via expect)
-#    If expect automation fails, the script prints manual instructions.
-
-if ! command -v expect &>/dev/null; then
-    echo "❌  'expect' is not installed. Please install it first:"
-    echo "    brew install expect"
-    exit 1
+# 3. Reuse an existing valid identity when possible so permissions stay stable.
+identity="$(find_okbrain_identity || true)"
+if [ -n "$identity" ]; then
+    echo "→ Reusing existing signing identity '$CERT_NAME' ($identity)"
+    security find-certificate -c "$CERT_NAME" -p "$KEYCHAIN" >"$CERT_PEM" 2>/dev/null || true
+else
+    echo "→ No valid signing identity found; removing stale '$CERT_NAME' certificates"
+    delete_stale_certificates
+    create_identity
 fi
 
-echo "→ Creating self-signed certificate '$CERT_NAME' via certtool..."
-echo "   (this will take ~10 seconds)"
-echo ""
-
-# Ensure keychain is unlocked before certtool (certtool rejects p= on existing keychains)
-security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN" 2>/dev/null || true
-
-set +e
-expect <<EXPECT_SCRIPT
-set timeout 30
-spawn certtool c k="$KEYCHAIN" o="$CERT_PEM" v
-
-expect {
-    "Enter certificate name:" {
-        send "$CERT_NAME\r"
-        exp_continue
-    }
-    "Is this a self-signed certificate?" {
-        send "y\r"
-        exp_continue
-    }
-    "Enter a password for the private key:" {
-        send "\r"
-        exp_continue
-    }
-    "Enter password again:" {
-        send "\r"
-        exp_continue
-    }
-    "Enter key size in bits:" {
-        send "\r"
-        exp_continue
-    }
-    -re "(?i)password.*keychain|keychain.*password|enter password|enter passphrase|unlock keychain" {
-        send "$KEYCHAIN_PASS\r"
-        exp_continue
-    }
-    -re "Enter .*:" {
-        send "\r"
-        exp_continue
-    }
-    "Key usage" {
-        send "\r"
-        exp_continue
-    }
-    "Extended key usage" {
-        send "\r"
-        exp_continue
-    }
-    timeout {
-        puts "\n⚠️  EXPECT TIMEOUT — certtool may be stuck on an unrecognized prompt"
-        exit 1
-    }
-    eof
-}
-EXPECT_SCRIPT
-CERTTOOL_STATUS=$?
-set -e
-
-if [ $CERTTOOL_STATUS -ne 0 ] || [ ! -f "$CERT_PEM" ]; then
-    echo ""
-    echo "⚠️  certtool failed — trying openssl fallback..."
-    echo ""
-
-    # Fallback: create cert with openssl and import as PKCS#12
-    openssl req -x509 -newkey rsa:2048 \
-        -keyout /tmp/okbrain_key.pem \
-        -out "$CERT_PEM" \
-        -days 3650 -nodes \
-        -subj "/CN=$CERT_NAME" \
-        -addext "keyUsage = critical, digitalSignature" \
-        -addext "extendedKeyUsage = codeSigning" 2>/dev/null
-
-    openssl pkcs12 -export \
-        -out /tmp/okbrain.p12 \
-        -inkey /tmp/okbrain_key.pem \
-        -in "$CERT_PEM" \
-        -name "$CERT_NAME" \
-        -passout pass:"$KEYCHAIN_PASS" 2>/dev/null
-
-    security import /tmp/okbrain.p12 \
-        -k "$KEYCHAIN" \
-        -P "$KEYCHAIN_PASS" \
-        -T /usr/bin/codesign 2>/dev/null
-
-    if [ $? -ne 0 ]; then
-        echo "❌  openssl fallback also failed."
-        echo ""
-        echo "   Manual fallback:"
-        echo "   1. Open Keychain Access (Cmd+Space → 'Keychain Access')"
-        echo "   2. Keychain Access menu → Certificate Assistant → Create a Certificate..."
-        echo "   3. Name: $CERT_NAME"
-        echo "   4. Identity Type: Self Signed Root"
-        echo "   5. Certificate Type: Code Signing"
-        echo "   6. Check 'Let me override defaults' → Continue → Continue..."
-        echo "   7. Save it to the 'okbrain' keychain"
-        echo ""
-        echo "   Then run this script again."
-        exit 1
-    fi
+# 4. Trust the certificate and allow non-interactive codesign access.
+if [ -s "$CERT_PEM" ]; then
+    trust_certificate
 fi
+allow_codesign_access
 
-# 4. Trust the certificate for code signing
-echo ""
-echo "→ Trusting certificate for code signing..."
-sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$CERT_PEM" 2>/dev/null || \
-    security add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$CERT_PEM" 2>/dev/null || true
-
-# 5. Allow codesign to access the keychain
-echo "→ Allowing codesign to access the keychain..."
-security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$KEYCHAIN_PASS" "$KEYCHAIN" 2>/dev/null || true
-
-# 6. Verify
+# 5. Verify
 echo ""
 echo "→ Verifying signing identity..."
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
+identity="$(find_okbrain_identity || true)"
+if [ -n "$identity" ]; then
     echo ""
     echo "✅  SUCCESS! Certificate '$CERT_NAME' is ready."
+    echo "   Identity: $identity"
     echo ""
     echo "   Next steps:"
     echo "   1. Run: $SCRIPT_DIR/build.sh"
@@ -170,8 +151,8 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; 
     echo ""
 else
     echo ""
-    echo "⚠️  Certificate created but codesign cannot see it yet."
-    echo "   Try: security find-identity -v -p codesigning"
-    echo "   If empty, open Keychain Access and manually trust the cert."
+    echo "❌  Certificate setup finished, but codesign still cannot see '$CERT_NAME'."
+    echo "   Try: security find-identity -v -p codesigning '$KEYCHAIN'"
+    echo "   If it is empty, open Keychain Access and manually trust the cert."
     exit 1
 fi

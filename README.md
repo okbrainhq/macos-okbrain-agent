@@ -55,6 +55,7 @@ These are requested automatically on first launch. If you rebuild without code s
 
 | Issue | Fix |
 |-------|-----|
-| `ambiguous matches` during codesign | Run `setup-codesign.sh` again; it removes duplicate certificates |
+| `ambiguous matches` during codesign | `build.sh` signs with the resolved SHA-1 identity hash; run `setup-codesign.sh` if the identity is missing |
+| Build prints `unsigned` after setup | Run `setup-codesign.sh` again and check that it prints an `Identity:` hash |
 | Permission dialogs keep appearing | Ensure the app is signed (`build.sh` prints `Signed ...`) |
 | Socket not found | Check that the agent is running (`pgrep OkBrainMacOSAgent`) |
