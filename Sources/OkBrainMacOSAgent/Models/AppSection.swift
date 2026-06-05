@@ -3,6 +3,7 @@ import Foundation
 enum AppSection: String, CaseIterable, Hashable, Identifiable {
   case overview
   case screenshot
+  case filePermissions
   case settings
   case diagnostics
 
@@ -16,6 +17,8 @@ enum AppSection: String, CaseIterable, Hashable, Identifiable {
       "Agent"
     case .screenshot:
       "Screenshot"
+    case .filePermissions:
+      "File Permissions"
     case .settings:
       "Settings"
     case .diagnostics:
@@ -29,6 +32,8 @@ enum AppSection: String, CaseIterable, Hashable, Identifiable {
       "antenna.radiowaves.left.and.right"
     case .screenshot:
       "camera.viewfinder"
+    case .filePermissions:
+      "folder.badge.gearshape"
     case .settings:
       "gearshape"
     case .diagnostics:

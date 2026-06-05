@@ -15,14 +15,17 @@ public protocol FileEditingServicing: Sendable {
 public final class LocalFileEditingService: FileEditingServicing, @unchecked Sendable {
   private let configuration: FileEditingConfiguration
   private let fileManager: FileManager
+  private let permissionEngine: FilePermissionRuleEngine
 
   public init(configuration: FileEditingConfiguration, fileManager: FileManager = .default) {
     self.configuration = configuration
     self.fileManager = fileManager
+    permissionEngine = FilePermissionRuleEngine(rules: configuration.allowedRoots)
   }
 
   public func describeWorkspace(_ params: AgentRequestParams) throws -> WorkspaceDescribePayload {
-    let root = try allowedRoot(for: params.root, requireExisting: false)
+    let root = try validatedRoot(for: params.root, requireExisting: false)
+    try ensureReadable(path: root.canonicalPath)
     let exists = isDirectory(root.canonicalPath)
     return WorkspaceDescribePayload(
       root: root.canonicalPath,
@@ -35,6 +38,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
 
   public func stat(_ params: AgentRequestParams) throws -> FileStatPayload {
     let resolved = try resolve(params, defaultPath: nil, requireExistingRoot: true)
+    try ensureReadable(resolved)
     guard let info = lstatInfo(resolved.url.path) else {
       throw AgentProtocolError.fileNotFound("Target does not exist: \(resolved.relativePath)")
     }
@@ -62,6 +66,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
 
   public func list(_ params: AgentRequestParams) throws -> FileListPayload {
     let resolved = try resolve(params, defaultPath: ".", requireExistingRoot: true)
+    try ensureReadable(resolved)
     guard let info = lstatInfo(resolved.url.path) else {
       throw AgentProtocolError.fileNotFound("Directory does not exist: \(resolved.relativePath)")
     }
@@ -145,6 +150,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
 
   public func read(_ params: AgentRequestParams) throws -> FileReadPayload {
     let resolved = try resolve(params, defaultPath: nil, requireExistingRoot: true)
+    try ensureReadable(resolved)
     guard let info = lstatInfo(resolved.url.path) else {
       throw AgentProtocolError.fileNotFound("File does not exist: \(resolved.relativePath)")
     }
@@ -305,6 +311,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     let resolved = try resolve(params, defaultPath: ".", requireExistingRoot: true)
+    try ensureReadable(resolved)
     guard isDirectory(resolved.url.path) else {
       throw AgentProtocolError.notADirectory("Search target is not a directory: \(resolved.relativePath)")
     }
@@ -394,7 +401,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     return FileSearchPayload(matches: matches, truncated: truncated)
   }
 
-  private func allowedRoot(for rawRoot: String?, requireExisting: Bool) throws -> RootContext {
+  private func validatedRoot(for rawRoot: String?, requireExisting: Bool) throws -> RootContext {
     guard configuration.enabled else {
       throw AgentProtocolError.rootNotAllowed("File editing is disabled")
     }
@@ -412,11 +419,14 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
       throw AgentProtocolError.fileNotFound("Root does not exist: \(requestedCanonical)")
     }
 
-    return RootContext(canonicalPath: requestedCanonical, mode: configuration.mode)
+    return RootContext(
+      canonicalPath: requestedCanonical,
+      mode: permissionEngine.decision(for: requestedCanonical).mode
+    )
   }
 
   private func resolve(_ params: AgentRequestParams, defaultPath: String?, requireExistingRoot: Bool) throws -> ResolvedPath {
-    let root = try allowedRoot(for: params.root, requireExisting: requireExistingRoot)
+    let root = try validatedRoot(for: params.root, requireExisting: requireExistingRoot)
     let rawRelative = (params.path ?? defaultPath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     guard !rawRelative.isEmpty else {
       throw AgentProtocolError.invalidRequest("File action requires path")
@@ -438,13 +448,27 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
       rootPath: root.canonicalPath,
       relativePath: normalizeResponsePath(relativePath(for: targetURL.path, root: root.canonicalPath)),
       url: targetURL,
-      mode: root.mode
+      mode: permissionEngine.decision(for: targetURL.path).mode
     )
+  }
+
+  private func ensureReadable(_ resolved: ResolvedPath) throws {
+    try ensureReadable(path: resolved.url.path, mode: resolved.mode)
+  }
+
+  private func ensureReadable(path: String) throws {
+    try ensureReadable(path: path, mode: permissionEngine.decision(for: path).mode)
+  }
+
+  private func ensureReadable(path: String, mode: FileEditingMode) throws {
+    guard mode.canRead else {
+      throw AgentProtocolError.rootNotAllowed("No permission rule allows read access to: \(path)")
+    }
   }
 
   private func ensureWritable(_ resolved: ResolvedPath) throws {
     guard resolved.mode.canWrite else {
-      throw AgentProtocolError.permissionDenied("File editing is read-only")
+      throw AgentProtocolError.permissionDenied("No permission rule allows write access to: \(resolved.url.path)")
     }
   }
 

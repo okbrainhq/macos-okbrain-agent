@@ -80,7 +80,7 @@ struct SettingsView: View {
               VStack(alignment: .leading, spacing: 4) {
                 Text("File Editing")
                   .font(.headline)
-                Text("Enables v2 fs.* RPCs. For now this is a simple app-level switch; per-root permissions will be added later.")
+                Text("Enables v2 fs.* RPCs. Access is still denied unless a File Permissions folder rule allows it.")
                   .font(.callout)
                   .foregroundStyle(.secondary)
               }
@@ -107,7 +107,13 @@ struct SettingsView: View {
             GridRow {
               Text("Scope")
                 .foregroundStyle(.secondary)
-              Text(store.configuration.fileEditing.enabled ? "Any absolute root supplied by the request" : "Disabled")
+              Text(store.configuration.fileEditing.enabled ? "Allowed folders only (default deny)" : "Disabled")
+            }
+
+            GridRow {
+              Text("Rules")
+                .foregroundStyle(.secondary)
+              Text("\(store.filePermissionRules.count) folder rule\(store.filePermissionRules.count == 1 ? "" : "s")")
             }
 
             GridRow {

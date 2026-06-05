@@ -116,9 +116,10 @@ Expected `data`:
   "fileEditing": {
     "enabled": true,
     "mode": "read-write",
-    "allowedRoots": [
+    "allowedRoots": [],
+    "permissionRules": [
       {
-        "path": "/Users/arunoda/projects/my-app",
+        "path": "/Users/arunoda/projects",
         "mode": "read-write"
       }
     ],
@@ -152,8 +153,10 @@ All file actions use a `root` plus a root-relative `path`.
 
 Rules:
 
-- `root` must match an agent-configured allowed root.
-- `path` must be relative; absolute paths are rejected.
+- Access is default-deny unless an agent-configured folder rule matches the effective target path.
+- A read/write folder rule applies to all nested paths unless a more specific child-folder rule overrides it.
+- `agent.status.fileEditing.allowedRoots` is legacy compatibility metadata and is not used for enforcement; native rules are reported as `permissionRules` and enforced by the agent on every `fs.*` request.
+- `root` must be absolute, and `path` must be relative; absolute paths are rejected.
 - The agent must canonicalize `root + path` with realpath-equivalent logic.
 - Reject traversal attempts like `../`, symlink escapes, or paths outside `root`.
 - Default symlink behavior is `followSymlinks: false` unless the root policy explicitly allows it.
@@ -535,7 +538,7 @@ npm run test:e2e -- e2e/code-project-macos-agent-files.spec.ts --reporter=line
 | P0 | Add Brain v2 status/capability detection. | Must |
 | P0 | Implement `fs.read`, `fs.write`, `fs.patch`, `fs.list`, `fs.search`. | Must |
 | P0 | Add fallback to existing SSH coding tools. | Must |
-| P1 | Add macOS app UI for approved roots and read-only/read-write mode. | Should |
+| P1 | Add macOS app UI for approved folder rules and read/write mode. | Done |
 | P1 | Add E2E coverage for routing, editing, and denial cases. | Should |
 | P2 | Add security-scoped bookmark support for sandboxed app distribution. | Could |
 | P2 | Add optional file watching/diff preview APIs. | Could |

@@ -313,12 +313,17 @@ public struct FileEditingStatusPayload: Codable, Equatable, Sendable {
   public let enabled: Bool
   public let mode: FileEditingMode
   public let allowedRoots: [FileEditingAllowedRoot]
+  public let permissionRules: [FileEditingAllowedRoot]?
   public let limits: FileEditingLimits
 
   public init(configuration: FileEditingConfiguration) {
     enabled = configuration.enabled
     mode = configuration.mode
-    allowedRoots = configuration.allowedRoots
+    // Keep this legacy status field unconstrained so clients do not perform
+    // their own exact-root approval checks. The agent enforces permissionRules
+    // natively for every fs.* request.
+    allowedRoots = []
+    permissionRules = configuration.allowedRoots
     limits = configuration.limits
   }
 }

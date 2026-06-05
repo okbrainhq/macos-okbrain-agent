@@ -22,6 +22,8 @@ struct DetailView: View {
         OverviewView()
       case .screenshot:
         ScreenshotView()
+      case .filePermissions:
+        PermissionRulesView()
       case .settings:
         SettingsView()
       case .diagnostics:

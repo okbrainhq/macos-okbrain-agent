@@ -1,16 +1,24 @@
 import Foundation
 
-public enum FileEditingMode: String, Codable, Equatable, Sendable {
+public enum FileEditingMode: String, Codable, Equatable, Hashable, Sendable {
   case disabled
   case readOnly = "read-only"
   case readWrite = "read-write"
+
+  public var canRead: Bool {
+    self == .readOnly || self == .readWrite
+  }
 
   public var canWrite: Bool {
     self == .readWrite
   }
 }
 
-public struct FileEditingAllowedRoot: Codable, Equatable, Sendable {
+public struct FileEditingAllowedRoot: Codable, Equatable, Identifiable, Sendable {
+  public var id: String {
+    path
+  }
+
   public let path: String
   public let mode: FileEditingMode
 
@@ -60,10 +68,15 @@ public struct FileEditingConfiguration: Codable, Equatable, Sendable {
 
   public static let disabled = FileEditingConfiguration()
 
-  public static func toggleEnabled(_ enabled: Bool, limits: FileEditingLimits = FileEditingLimits()) -> FileEditingConfiguration {
+  public static func toggleEnabled(
+    _ enabled: Bool,
+    allowedRoots: [FileEditingAllowedRoot] = [],
+    limits: FileEditingLimits = FileEditingLimits()
+  ) -> FileEditingConfiguration {
     FileEditingConfiguration(
       enabled: enabled,
       mode: enabled ? .readWrite : .disabled,
+      allowedRoots: allowedRoots,
       limits: limits
     )
   }
@@ -103,7 +116,8 @@ public struct AgentConfiguration: Equatable, Sendable {
   public static func current(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     bundle: Bundle = .main,
-    fileEditingEnabled: Bool = false
+    fileEditingEnabled: Bool = false,
+    filePermissionRules: [FileEditingAllowedRoot] = []
   ) -> AgentConfiguration {
     let configuredSocketPath = environment["MACOS_AGENT_SOCKET_PATH"]?
       .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -120,7 +134,11 @@ public struct AgentConfiguration: Equatable, Sendable {
       maxListEntries: positiveInt(environment["MACOS_AGENT_MAX_LIST_ENTRIES"]) ?? 1000
     )
 
-    let fileEditing = FileEditingConfiguration.toggleEnabled(fileEditingEnabled, limits: limits)
+    let fileEditing = FileEditingConfiguration.toggleEnabled(
+      fileEditingEnabled,
+      allowedRoots: filePermissionRules,
+      limits: limits
+    )
     let minimumRequestBytes = fileEditing.enabled ? fileEditing.limits.maxWriteBytes + 1024 * 1024 : 64 * 1024
     let maxRequestBytes = positiveInt(environment["MACOS_AGENT_MAX_REQUEST_BYTES"]) ?? max(6 * 1024 * 1024, minimumRequestBytes)
 
@@ -134,7 +152,18 @@ public struct AgentConfiguration: Equatable, Sendable {
   }
 
   public func withFileEditingEnabled(_ enabled: Bool) -> AgentConfiguration {
-    let nextFileEditing = FileEditingConfiguration.toggleEnabled(enabled, limits: fileEditing.limits)
+    withFileEditingSettings(enabled: enabled, allowedRoots: fileEditing.allowedRoots)
+  }
+
+  public func withFileEditingSettings(
+    enabled: Bool,
+    allowedRoots: [FileEditingAllowedRoot]
+  ) -> AgentConfiguration {
+    let nextFileEditing = FileEditingConfiguration.toggleEnabled(
+      enabled,
+      allowedRoots: allowedRoots,
+      limits: fileEditing.limits
+    )
     let minimumRequestBytes = nextFileEditing.enabled ? nextFileEditing.limits.maxWriteBytes + 1024 * 1024 : 64 * 1024
 
     return AgentConfiguration(

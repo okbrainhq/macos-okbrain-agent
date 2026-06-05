@@ -29,6 +29,7 @@ final class AgentRuntimeStore: ObservableObject {
 
   private static let preventIdleSleepDefaultsKey = "preventIdleSleepEnabled"
   private static let fileEditingEnabledDefaultsKey = "fileEditingEnabled"
+  private static let filePermissionRulesDefaultsKey = "filePermissionRules"
   private static let preventIdleSleepReason = "OkBrain Agent is running and ready for remote screenshots."
 
   @Published private(set) var configuration: AgentConfiguration
@@ -37,6 +38,7 @@ final class AgentRuntimeStore: ObservableObject {
   @Published private(set) var latestScreenshot: ScreenshotPreview?
   @Published private(set) var latestProtocolResponse = ""
   @Published private(set) var isCapturing = false
+  @Published private(set) var filePermissionRules: [FileEditingAllowedRoot]
   @Published var preventIdleSleepEnabled: Bool {
     didSet {
       guard preventIdleSleepEnabled != oldValue else {
@@ -74,10 +76,15 @@ final class AgentRuntimeStore: ObservableObject {
 
     let preventIdleSleepEnabled = UserDefaults.standard.bool(forKey: Self.preventIdleSleepDefaultsKey)
     let fileEditingEnabled = UserDefaults.standard.bool(forKey: Self.fileEditingEnabledDefaultsKey)
-    let configuration = AgentConfiguration.current(fileEditingEnabled: fileEditingEnabled)
+    let filePermissionRules = Self.loadFilePermissionRules()
+    let configuration = AgentConfiguration.current(
+      fileEditingEnabled: fileEditingEnabled,
+      filePermissionRules: filePermissionRules
+    )
     self.configuration = configuration
     self.preventIdleSleepEnabled = preventIdleSleepEnabled
     self.fileEditingEnabled = fileEditingEnabled
+    self.filePermissionRules = filePermissionRules
     idleSleepPrevention = IdleSleepPreventionSnapshot(
       state: preventIdleSleepEnabled ? .inactive : .disabled,
       activityDescription: nil,
@@ -119,8 +126,52 @@ final class AgentRuntimeStore: ObservableObject {
     permissions = permissionService.currentPermissions()
   }
 
+  func upsertFilePermissionRule(path rawPath: String, mode: FileEditingMode) throws {
+    guard mode.canRead else {
+      throw AgentProtocolError.invalidRequest("Permission rules must be read or write")
+    }
+
+    let normalizedPath = try FilePermissionRuleEngine.normalizedRulePath(rawPath)
+    let newRule = FileEditingAllowedRoot(path: normalizedPath, mode: mode)
+    let nextRules = filePermissionRules.filter { $0.path != normalizedPath } + [newRule]
+    replaceFilePermissionRules(nextRules)
+  }
+
+  func updateFilePermissionRule(path: String, mode: FileEditingMode) {
+    guard mode.canRead else {
+      return
+    }
+
+    let normalizedPath = (try? FilePermissionRuleEngine.normalizedRulePath(path)) ?? path
+    let nextRules = filePermissionRules.map { rule in
+      rule.path == normalizedPath ? FileEditingAllowedRoot(path: rule.path, mode: mode) : rule
+    }
+    replaceFilePermissionRules(nextRules)
+  }
+
+  func removeFilePermissionRules(paths: Set<String>) {
+    guard !paths.isEmpty else {
+      return
+    }
+
+    replaceFilePermissionRules(filePermissionRules.filter { !paths.contains($0.path) })
+  }
+
+  private func replaceFilePermissionRules(_ nextRules: [FileEditingAllowedRoot]) {
+    guard nextRules != filePermissionRules else {
+      return
+    }
+
+    filePermissionRules = nextRules
+    Self.saveFilePermissionRules(nextRules)
+    applyFileEditingSetting()
+  }
+
   private func applyFileEditingSetting() {
-    let nextConfiguration = configuration.withFileEditingEnabled(fileEditingEnabled)
+    let nextConfiguration = configuration.withFileEditingSettings(
+      enabled: fileEditingEnabled,
+      allowedRoots: filePermissionRules
+    )
     guard nextConfiguration != configuration else {
       return
     }
@@ -241,6 +292,30 @@ final class AgentRuntimeStore: ObservableObject {
       activityDescription: activityDescription,
       errorMessage: nil
     )
+  }
+
+  private static func loadFilePermissionRules() -> [FileEditingAllowedRoot] {
+    guard let data = UserDefaults.standard.data(forKey: filePermissionRulesDefaultsKey),
+          let rules = try? JSONDecoder().decode([FileEditingAllowedRoot].self, from: data) else {
+      return []
+    }
+
+    return rules.compactMap { rule in
+      guard rule.mode.canRead,
+            let normalizedPath = try? FilePermissionRuleEngine.normalizedRulePath(rule.path) else {
+        return nil
+      }
+
+      return FileEditingAllowedRoot(path: normalizedPath, mode: rule.mode)
+    }
+  }
+
+  private static func saveFilePermissionRules(_ rules: [FileEditingAllowedRoot]) {
+    guard let data = try? JSONEncoder().encode(rules) else {
+      return
+    }
+
+    UserDefaults.standard.set(data, forKey: filePermissionRulesDefaultsKey)
   }
 
   private static func preview(from responseData: Data) -> ScreenshotPreview? {
