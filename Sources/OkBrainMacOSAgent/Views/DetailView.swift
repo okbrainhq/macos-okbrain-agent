@@ -3,6 +3,11 @@ import SwiftUI
 struct DetailView: View {
   let section: AppSection
 
+  private enum Layout {
+    static let defaultPadding: CGFloat = 32
+    static let filePermissionsTopPadding: CGFloat = 80
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
       HStack(spacing: 12) {
@@ -22,6 +27,8 @@ struct DetailView: View {
         OverviewView()
       case .screenshot:
         ScreenshotView()
+      case .filePermissions:
+        PermissionRulesView()
       case .settings:
         SettingsView()
       case .diagnostics:
@@ -30,7 +37,13 @@ struct DetailView: View {
 
       Spacer(minLength: 0)
     }
-    .padding(32)
+    .padding(.horizontal, Layout.defaultPadding)
+    .padding(.top, detailTopPadding)
+    .padding(.bottom, Layout.defaultPadding)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+  }
+
+  private var detailTopPadding: CGFloat {
+    section == .filePermissions ? Layout.filePermissionsTopPadding : Layout.defaultPadding
   }
 }

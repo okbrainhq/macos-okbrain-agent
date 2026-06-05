@@ -64,19 +64,51 @@ cat >"$INFO_PLIST" <<PLIST
 PLIST
 
 # Sign the app if the local dev certificate exists.
-# Using SHA-1 hash to avoid ambiguity when multiple certs share the same name.
-CODESIGN_HASH="21609ACF2FF1CBB60C9669EC01CB52D01FEBAF47"
+# The certificate hash is generated when setup-codesign.sh creates/imports the
+# identity, so discover it dynamically instead of hard-coding a stale hash.
+CERT_NAME="OkBrain Dev"
 OKBRAIN_KEYCHAIN="$HOME/Library/Keychains/okbrain.keychain-db"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CODESIGN_HASH"; then
-    if [ -f "$OKBRAIN_KEYCHAIN" ]; then
-        security unlock-keychain -p okbrain "$OKBRAIN_KEYCHAIN" 2>/dev/null || true
-        security set-key-partition-list -S apple-tool:,apple:,codesign: -k okbrain "$OKBRAIN_KEYCHAIN" >/dev/null 2>&1 || true
-    fi
+OKBRAIN_KEYCHAIN_PASS="okbrain"
 
-    if codesign --force --deep --sign "$CODESIGN_HASH" "$APP_BUNDLE"; then
-        echo "Signed $APP_BUNDLE with OkBrain Dev"
+find_okbrain_identity() {
+    local keychain="${1:-}"
+
+    if [ -n "$keychain" ]; then
+        security find-identity -v -p codesigning "$keychain" 2>/dev/null
     else
-        echo "Built $APP_BUNDLE (unsigned — codesign could not access OkBrain Dev; run scripts/setup-codesign.sh)"
+        security find-identity -v -p codesigning 2>/dev/null
+    fi | awk -v name="$CERT_NAME" '
+        $2 ~ /^[[:xdigit:]]{40}$/ && index($0, "\"" name "\"") { print $2; exit }
+    '
+}
+
+CODESIGN_IDENTITY=""
+CODESIGN_KEYCHAIN_ARGS=()
+
+if [ -f "$OKBRAIN_KEYCHAIN" ]; then
+    security unlock-keychain -p "$OKBRAIN_KEYCHAIN_PASS" "$OKBRAIN_KEYCHAIN" 2>/dev/null || true
+    security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$OKBRAIN_KEYCHAIN_PASS" "$OKBRAIN_KEYCHAIN" >/dev/null 2>&1 || true
+
+    CODESIGN_IDENTITY="$(find_okbrain_identity "$OKBRAIN_KEYCHAIN" || true)"
+    if [ -n "$CODESIGN_IDENTITY" ]; then
+        CODESIGN_KEYCHAIN_ARGS=(--keychain "$OKBRAIN_KEYCHAIN")
+    fi
+fi
+
+# Fallback for manually-created identities in the default keychains.
+if [ -z "$CODESIGN_IDENTITY" ]; then
+    CODESIGN_IDENTITY="$(find_okbrain_identity || true)"
+fi
+
+if [ -n "$CODESIGN_IDENTITY" ]; then
+    if codesign --force --deep "${CODESIGN_KEYCHAIN_ARGS[@]}" --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"; then
+        if codesign --verify --deep --strict "$APP_BUNDLE" >/dev/null 2>&1; then
+            echo "Signed $APP_BUNDLE with $CERT_NAME ($CODESIGN_IDENTITY)"
+        else
+            echo "Built $APP_BUNDLE (signed but verification failed — run scripts/setup-codesign.sh)"
+        fi
+    else
+        echo "Built $APP_BUNDLE (unsigned — codesign could not access $CERT_NAME; run scripts/setup-codesign.sh)"
     fi
 else
     echo "Built $APP_BUNDLE (unsigned — run scripts/setup-codesign.sh to enable persistent permissions)"
