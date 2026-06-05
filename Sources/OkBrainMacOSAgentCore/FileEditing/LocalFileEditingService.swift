@@ -271,12 +271,18 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     let fallback = params.whitespaceNormalizedFallback ?? true
+    let patchEngine = TextPatchEngine()
     var changedLines: [Int] = []
 
     for edit in edits {
-      let match = try findPatchMatch(edit, in: text, whitespaceNormalizedFallback: fallback)
-      changedLines.append(lineNumber(at: match.lowerBound, in: text))
-      text.replaceSubrange(match, with: edit.newText)
+      let match = try patchEngine.findMatch(
+        oldText: edit.oldText,
+        in: text,
+        startLine: edit.startLine,
+        whitespaceNormalizedFallback: fallback
+      )
+      changedLines.append(match.line)
+      text.replaceSubrange(match.range, with: edit.newText)
     }
 
     guard let patchedData = text.data(using: .utf8) else {
@@ -572,130 +578,6 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
   }
 
-  private func findPatchMatch(
-    _ edit: FilePatchEdit,
-    in text: String,
-    whitespaceNormalizedFallback: Bool
-  ) throws -> Range<String.Index> {
-    guard !edit.oldText.isEmpty else {
-      throw AgentProtocolError.invalidRequest("Patch oldText must not be empty")
-    }
-
-    var ranges = exactRanges(of: edit.oldText, in: text, startLine: edit.startLine)
-    if ranges.isEmpty, whitespaceNormalizedFallback {
-      ranges = normalizedWhitespaceRanges(of: edit.oldText, in: text, startLine: edit.startLine)
-    }
-
-    guard !ranges.isEmpty else {
-      throw AgentProtocolError.patchNotFound("Patch oldText was not found")
-    }
-    guard ranges.count == 1 else {
-      throw AgentProtocolError.ambiguousPatch("Patch oldText matched multiple locations; provide startLine")
-    }
-    return ranges[0]
-  }
-
-  private func exactRanges(of needle: String, in haystack: String, startLine: Int?) -> [Range<String.Index>] {
-    var ranges: [Range<String.Index>] = []
-    var searchRange = haystack.startIndex..<haystack.endIndex
-
-    while let range = haystack.range(of: needle, options: [], range: searchRange) {
-      if startLine == nil || lineNumber(at: range.lowerBound, in: haystack) == startLine {
-        ranges.append(range)
-      }
-      guard range.upperBound < haystack.endIndex else {
-        break
-      }
-      searchRange = range.upperBound..<haystack.endIndex
-    }
-
-    return ranges
-  }
-
-  private func normalizedWhitespaceRanges(of needle: String, in haystack: String, startLine: Int?) -> [Range<String.Index>] {
-    let normalizedHaystack = normalizeTrailingWhitespaceAndLineEndingsWithMap(haystack)
-    let normalizedNeedle = normalizeTrailingWhitespaceAndLineEndingsWithMap(needle).text
-    guard !normalizedNeedle.isEmpty else {
-      return []
-    }
-
-    var ranges: [Range<String.Index>] = []
-    var searchRange = normalizedHaystack.text.startIndex..<normalizedHaystack.text.endIndex
-
-    while let range = normalizedHaystack.text.range(of: normalizedNeedle, options: [], range: searchRange) {
-      let lowerOffset = normalizedHaystack.text.distance(from: normalizedHaystack.text.startIndex, to: range.lowerBound)
-      let upperOffset = normalizedHaystack.text.distance(from: normalizedHaystack.text.startIndex, to: range.upperBound)
-      guard lowerOffset < normalizedHaystack.map.count else {
-        break
-      }
-
-      let originalStart = normalizedHaystack.map[lowerOffset]
-      let originalEnd = upperOffset < normalizedHaystack.map.count ? normalizedHaystack.map[upperOffset] : haystack.endIndex
-      let originalRange = originalStart..<originalEnd
-      if startLine == nil || lineNumber(at: originalStart, in: haystack) == startLine {
-        ranges.append(originalRange)
-      }
-
-      guard range.upperBound < normalizedHaystack.text.endIndex else {
-        break
-      }
-      searchRange = range.upperBound..<normalizedHaystack.text.endIndex
-    }
-
-    return ranges
-  }
-
-  private func normalizeTrailingWhitespaceAndLineEndingsWithMap(_ source: String) -> (text: String, map: [String.Index]) {
-    var normalized = ""
-    var map: [String.Index] = []
-    var lineStart = source.startIndex
-
-    while lineStart < source.endIndex {
-      var lineEnd = lineStart
-      var newlineIndex: String.Index?
-
-      while lineEnd < source.endIndex {
-        let character = source[lineEnd]
-        if character == "\n" || character == "\r" {
-          newlineIndex = lineEnd
-          break
-        }
-        lineEnd = source.index(after: lineEnd)
-      }
-
-      var trimEnd = lineEnd
-      while trimEnd > lineStart {
-        let previous = source.index(before: trimEnd)
-        if source[previous] == " " || source[previous] == "\t" {
-          trimEnd = previous
-        } else {
-          break
-        }
-      }
-
-      var index = lineStart
-      while index < trimEnd {
-        normalized.append(source[index])
-        map.append(index)
-        index = source.index(after: index)
-      }
-
-      if let newlineIndex {
-        normalized.append("\n")
-        map.append(newlineIndex)
-        var next = source.index(after: newlineIndex)
-        if source[newlineIndex] == "\r", next < source.endIndex, source[next] == "\n" {
-          next = source.index(after: next)
-        }
-        lineStart = next
-      } else {
-        lineStart = source.endIndex
-      }
-    }
-
-    return (normalized, map)
-  }
-
   private func lineRanges(in text: String) -> [Range<String.Index>] {
     guard !text.isEmpty else {
       return []
@@ -721,12 +603,6 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     return ranges
-  }
-
-  private func lineNumber(at index: String.Index, in text: String) -> Int {
-    text[..<index].reduce(1) { count, character in
-      character == "\n" ? count + 1 : count
-    }
   }
 
   private func validateTextEncoding(_ encoding: String?) throws {

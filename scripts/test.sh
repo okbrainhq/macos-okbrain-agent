@@ -38,6 +38,11 @@ SWIFT_TARGET="$(uname -m)-apple-macosx14.0"
 swiftc -target "$SWIFT_TARGET" -module-cache-path "$CLANG_MODULE_CACHE_PATH" "${CORE_SOURCES[@]}" "$ROOT_DIR/scripts/verify_protocol.swift" -o "$VERIFY_BINARY"
 "$VERIFY_BINARY"
 
+section "Patch engine verifier"
+PATCH_VERIFY_BINARY="$VERIFY_DIR/verify_patch_engine"
+swiftc -target "$SWIFT_TARGET" -module-cache-path "$CLANG_MODULE_CACHE_PATH" "${CORE_SOURCES[@]}" "$ROOT_DIR/scripts/verify_patch_engine.swift" -o "$PATCH_VERIFY_BINARY"
+"$PATCH_VERIFY_BINARY"
+
 section "Shell syntax checks"
 while IFS= read -r script; do
   bash -n "$script"

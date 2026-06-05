@@ -109,7 +109,10 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
     socketPath: "/tmp/test-agent.sock",
     version: "9.9.9",
     build: "test",
-    fileEditing: FileEditingConfiguration.toggleEnabled(true)
+    fileEditing: FileEditingConfiguration.toggleEnabled(
+      true,
+      allowedRoots: [FileEditingAllowedRoot(path: rootURL.path, mode: .readWrite)]
+    )
   )
   let handler = AgentRequestHandler(
     configuration: configuration,
