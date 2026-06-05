@@ -12,101 +12,96 @@ struct PermissionRulesView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      GroupBox {
-        VStack(alignment: .leading, spacing: 14) {
-          HStack(alignment: .top, spacing: 16) {
-            Toggle(
-              isOn: Binding(
-                get: { store.fileEditingEnabled },
-                set: { store.fileEditingEnabled = $0 }
-              )
-            ) {
-              VStack(alignment: .leading, spacing: 4) {
-                Text("File Editing")
-                  .font(.headline)
-                Text("Default is deny. A folder rule grants read or write access to that folder and its nested paths.")
+      if store.fileEditingEnabled {
+        GroupBox {
+          VStack(alignment: .leading, spacing: 14) {
+            Text("File Permissions")
+              .font(.headline)
+            Text("Default is deny. A folder rule grants read or write access to that folder and its nested paths.")
+              .font(.callout)
+              .foregroundStyle(.secondary)
+            Text("Most specific folder wins: add a child-folder rule to override a parent rule.")
+              .font(.callout)
+              .foregroundStyle(.secondary)
+          }
+          .padding(4)
+        }
+
+        GroupBox("Add Rule") {
+          VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+              TextField("/absolute/folder/path", text: $newRulePath)
+                .textFieldStyle(.roundedBorder)
+                .font(.callout.monospaced())
+
+              Button("Browse…", action: chooseFolder)
+            }
+
+            HStack(spacing: 12) {
+              Picker("Access", selection: $newRuleMode) {
+                Text("Read").tag(FileEditingMode.readOnly)
+                Text("Write").tag(FileEditingMode.readWrite)
+              }
+              .pickerStyle(.segmented)
+              .frame(width: 220)
+
+              Button("Add Rule", action: addRule)
+                .buttonStyle(.borderedProminent)
+                .disabled(newRulePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+              if let errorMessage {
+                Text(errorMessage)
                   .font(.callout)
-                  .foregroundStyle(.secondary)
+                  .foregroundStyle(.red)
+                  .textSelection(.enabled)
               }
             }
-            .toggleStyle(.switch)
-
-            Spacer(minLength: 12)
-
-            StatusPill(
-              title: store.fileEditingEnabled ? "Enabled" : "Disabled",
-              systemImage: store.fileEditingEnabled ? "checkmark.circle.fill" : "lock.doc",
-              tint: store.fileEditingEnabled ? .green : .secondary
-            )
           }
+          .padding(4)
+        }
 
-          Text("Most specific folder wins: add a child-folder rule to override a parent rule.")
+        GroupBox {
+          VStack(alignment: .leading, spacing: 10) {
+            HStack {
+              Text("Permission Rules")
+                .font(.headline)
+
+              Spacer()
+
+              Button(role: .destructive, action: removeSelectedRules) {
+                Label("Remove", systemImage: "trash")
+              }
+              .disabled(selectedRulePaths.isEmpty)
+            }
+
+            if store.filePermissionRules.isEmpty {
+              VStack(alignment: .leading, spacing: 6) {
+                Text("No rules yet")
+                  .font(.headline)
+                Text("All file paths are denied until you add a folder rule.")
+                  .foregroundStyle(.secondary)
+              }
+              .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
+            } else {
+              permissionRulesTable
+            }
+          }
+          .padding(4)
+        }
+      } else {
+        VStack(spacing: 12) {
+          Image(systemName: "lock.doc")
+            .font(.system(size: 40))
+            .foregroundStyle(.secondary)
+          Text("File Editing is Disabled")
+            .font(.headline)
+          Text("Enable file editing from the Settings page to manage permission rules.")
             .font(.callout)
             .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
         }
-        .padding(4)
-      }
-
-      GroupBox("Add Rule") {
-        VStack(alignment: .leading, spacing: 12) {
-          HStack(spacing: 10) {
-            TextField("/absolute/folder/path", text: $newRulePath)
-              .textFieldStyle(.roundedBorder)
-              .font(.callout.monospaced())
-
-            Button("Browse…", action: chooseFolder)
-          }
-
-          HStack(spacing: 12) {
-            Picker("Access", selection: $newRuleMode) {
-              Text("Read").tag(FileEditingMode.readOnly)
-              Text("Write").tag(FileEditingMode.readWrite)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 220)
-
-            Button("Add Rule", action: addRule)
-              .buttonStyle(.borderedProminent)
-              .disabled(newRulePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-            if let errorMessage {
-              Text(errorMessage)
-                .font(.callout)
-                .foregroundStyle(.red)
-                .textSelection(.enabled)
-            }
-          }
-        }
-        .padding(4)
-      }
-
-      GroupBox {
-        VStack(alignment: .leading, spacing: 10) {
-          HStack {
-            Text("Permission Rules")
-              .font(.headline)
-
-            Spacer()
-
-            Button(role: .destructive, action: removeSelectedRules) {
-              Label("Remove", systemImage: "trash")
-            }
-            .disabled(selectedRulePaths.isEmpty)
-          }
-
-          if store.filePermissionRules.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-              Text("No rules yet")
-                .font(.headline)
-              Text("All file paths are denied until you add a folder rule.")
-                .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
-          } else {
-            permissionRulesTable
-          }
-        }
-        .padding(4)
+        .frame(maxWidth: .infinity, minHeight: 200, alignment: .center)
+        .padding(.vertical, 20)
       }
     }
     .frame(maxWidth: .infinity, alignment: .topLeading)
