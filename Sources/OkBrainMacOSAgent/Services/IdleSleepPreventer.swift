@@ -1,7 +1,7 @@
 import Foundation
 
 final class IdleSleepPreventer {
-  private static let activitySummary = "ProcessInfo activity: userInitiated + idleSystemSleepDisabled + idleDisplaySleepDisabled"
+  private static let activitySummary = "ProcessInfo activity: userInitiated + idleSystemSleepDisabled (display sleep allowed)"
 
   private var activity: NSObjectProtocol?
 
@@ -16,7 +16,7 @@ final class IdleSleepPreventer {
     }
 
     activity = ProcessInfo.processInfo.beginActivity(
-      options: [.userInitiated, .idleSystemSleepDisabled, .idleDisplaySleepDisabled],
+      options: [.userInitiated, .idleSystemSleepDisabled],
       reason: reason
     )
 

@@ -54,7 +54,7 @@ struct SettingsView: View {
             GridRow {
               Text("Behavior")
                 .foregroundStyle(.secondary)
-              Text("Prevents idle display/system sleep while the agent is active; no global pmset settings are changed.")
+              Text("Prevents idle system sleep while the agent is active; screen can turn off normally. No global pmset settings are changed.")
             }
           }
 

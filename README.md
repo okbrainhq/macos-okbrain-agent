@@ -35,7 +35,7 @@ Output: `dist/OkBrainMacOSAgent.app`
 ./scripts/run.sh
 ```
 
-The agent starts a Unix socket at `/tmp/okbrain-macos-agent.sock` and listens for `OKB1` binary-framed requests. Screenshots are encoded locally as WebP quality 80 and returned as binary response bodies. By default, it starts a per-process `ProcessInfo` activity with idle display/system sleep disabled while the agent is active, so remote screenshots stay available without changing global `pmset` settings or requiring sudo.
+The agent starts a Unix socket at `/tmp/okbrain-macos-agent.sock` and listens for `OKB1` binary-framed requests. Screenshots are encoded locally as WebP quality 80 and returned as binary response bodies. By default, it starts a per-process `ProcessInfo` activity with idle system sleep disabled while the agent is active (display sleep is allowed, so the screen can turn off normally), without changing global `pmset` settings or requiring sudo.
 
 ## File Editing
 
