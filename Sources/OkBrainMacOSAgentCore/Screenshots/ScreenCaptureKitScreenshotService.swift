@@ -15,6 +15,15 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
     let includeCursor = params.includeCursor ?? false
     let webPQuality = params.quality ?? 80
 
+    // Wake the display briefly so ScreenCaptureKit can capture valid content
+    // even when the display has gone to sleep. The assertion is released
+    // automatically when the variable goes out of scope.
+    let displayWake = DisplayWakeAssertion()
+    defer { displayWake.release() }
+
+    // Brief delay to let the display fully wake and render a valid frame
+    Thread.sleep(forTimeInterval: 1.0)
+
     let image: CGImage
     switch (params.mode ?? "full").lowercased() {
     case "full":
