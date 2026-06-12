@@ -5,23 +5,19 @@ struct SettingsView: View {
   @EnvironmentObject private var store: AgentRuntimeStore
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 16) {
+    VStack(alignment: .leading, spacing: 20) {
+      // MARK: - Prevent Idle Sleep
       GroupBox {
         VStack(alignment: .leading, spacing: 14) {
-          HStack(alignment: .top, spacing: 16) {
+          HStack(alignment: .center) {
             Toggle(
               isOn: Binding(
                 get: { store.preventIdleSleepEnabled },
                 set: { store.preventIdleSleepEnabled = $0 }
               )
             ) {
-              VStack(alignment: .leading, spacing: 4) {
-                Text("Prevent Idle Sleep")
-                  .font(.headline)
-                Text("Uses a per-process macOS activity assertion so remote screenshots stay available without sudo.")
-                  .font(.callout)
-                  .foregroundStyle(.secondary)
-              }
+              Text("Prevent Idle Sleep")
+                .font(.headline)
             }
             .toggleStyle(.switch)
 
@@ -36,26 +32,31 @@ struct SettingsView: View {
 
           Divider()
 
-          Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 10) {
-            GridRow {
-              Text("Default")
-                .foregroundStyle(.secondary)
-              Text("On")
-            }
+          VStack(alignment: .leading, spacing: 10) {
+            InfoRow(
+              icon: "display",
+              text: "Keeps your Mac awake so the agent can always respond. Your screen can still turn off normally to save power."
+            )
 
-            GridRow {
-              Text("Activity")
-                .foregroundStyle(.secondary)
-              Text(activityText)
-                .font(.callout.monospaced())
-                .textSelection(.enabled)
-            }
+            InfoRow(
+              icon: "wake",
+              text: "When the display is off, the agent will briefly wake it to take screenshots, then let it sleep again."
+            )
 
-            GridRow {
-              Text("Behavior")
-                .foregroundStyle(.secondary)
-              Text("Prevents idle system sleep while the agent is active; screen can turn off normally. No global pmset settings are changed.")
-            }
+            InfoRow(
+              icon: "lock.screen",
+              text: "You can lock your screen — the agent keeps working. However, screenshots are unavailable while locked."
+            )
+
+            InfoRow(
+              icon: "gearshape",
+              text: "Tip: Set your Mac's auto-lock to \"Never\" so the screen turns off without locking, allowing screenshots to work."
+            )
+
+            InfoRow(
+              icon: "shield.checkered",
+              text: "No system settings are changed. Sleep prevention only applies while this app is running."
+            )
           }
 
           if let errorMessage = store.idleSleepPrevention.errorMessage {
@@ -68,22 +69,18 @@ struct SettingsView: View {
         .padding(4)
       }
 
+      // MARK: - File Editing
       GroupBox {
         VStack(alignment: .leading, spacing: 14) {
-          HStack(alignment: .top, spacing: 16) {
+          HStack(alignment: .center) {
             Toggle(
               isOn: Binding(
                 get: { store.fileEditingEnabled },
                 set: { store.fileEditingEnabled = $0 }
               )
             ) {
-              VStack(alignment: .leading, spacing: 4) {
-                Text("File Editing")
-                  .font(.headline)
-                Text("Enables v3 fs.* RPCs. Access is still denied unless a File Permissions folder rule allows it.")
-                  .font(.callout)
-                  .foregroundStyle(.secondary)
-              }
+              Text("File Editing")
+                .font(.headline)
             }
             .toggleStyle(.switch)
 
@@ -96,31 +93,36 @@ struct SettingsView: View {
             )
           }
 
-          Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 10) {
-            GridRow {
-              Text("Mode")
-                .foregroundStyle(.secondary)
-              Text(store.configuration.fileEditing.mode.rawValue)
-                .font(.callout.monospaced())
-            }
+          Divider()
 
-            GridRow {
-              Text("Scope")
-                .foregroundStyle(.secondary)
-              Text(store.configuration.fileEditing.enabled ? "Allowed folders only (default deny)" : "Disabled")
-            }
+          VStack(alignment: .leading, spacing: 10) {
+            InfoRow(
+              icon: "doc.text",
+              text: "Allows the agent to read and write files on your Mac. Disabled by default — you stay in control."
+            )
 
-            GridRow {
-              Text("Rules")
-                .foregroundStyle(.secondary)
-              Text("\(store.filePermissionRules.count) folder rule\(store.filePermissionRules.count == 1 ? "" : "s")")
-            }
+            InfoRow(
+              icon: "folder.badge.gearshape",
+              text: "Access is restricted to folders you explicitly allow. The agent cannot touch anything outside those boundaries."
+            )
 
-            GridRow {
-              Text("Limits")
+            InfoRow(
+              icon: "lock.open",
+              text: "Each folder rule can be set to read-only or read-write, so you decide exactly what the agent can do."
+            )
+
+            InfoRow(
+              icon: "shield.checkered",
+              text: "Built-in size limits protect against accidental huge writes. Access stays limited to the folders you allow."
+            )
+
+            HStack(spacing: 6) {
+              Image(systemName: "folder.fill")
                 .foregroundStyle(.secondary)
-              Text("read \(store.configuration.fileEditing.limits.maxReadBytes) B • write \(store.configuration.fileEditing.limits.maxWriteBytes) B")
-                .font(.callout.monospaced())
+                .frame(width: 16)
+              Text("\(store.filePermissionRules.count) folder rule\(store.filePermissionRules.count == 1 ? "" : "s") configured")
+                .font(.callout)
+                .foregroundStyle(.secondary)
             }
           }
         }
@@ -130,14 +132,31 @@ struct SettingsView: View {
     .frame(maxWidth: .infinity, alignment: .topLeading)
   }
 
-  private var activityText: String {
-    store.idleSleepPrevention.activityDescription ?? "None"
-  }
-
   private var fileEditingStatus: String {
     store.configuration.fileEditing.enabled ? "Enabled" : "Disabled"
   }
 }
+
+// MARK: - Info Row
+
+private struct InfoRow: View {
+  let icon: String
+  let text: String
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 8) {
+      Image(systemName: icon)
+        .foregroundStyle(.secondary)
+        .frame(width: 16)
+        .padding(.top, 1)
+      Text(text)
+        .font(.callout)
+        .foregroundStyle(.secondary)
+    }
+  }
+}
+
+// MARK: - State Extensions
 
 private extension IdleSleepPreventionSnapshot.State {
   var label: String {

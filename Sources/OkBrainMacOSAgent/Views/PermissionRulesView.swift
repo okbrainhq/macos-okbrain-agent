@@ -14,15 +14,36 @@ struct PermissionRulesView: View {
     VStack(alignment: .leading, spacing: 16) {
       if store.fileEditingEnabled {
         GroupBox {
-          VStack(alignment: .leading, spacing: 14) {
-            Text("File Permissions")
-              .font(.headline)
-            Text("Default is deny. A folder rule grants read or write access to that folder and its nested paths.")
-              .font(.callout)
-              .foregroundStyle(.secondary)
-            Text("Most specific folder wins: add a child-folder rule to override a parent rule.")
-              .font(.callout)
-              .foregroundStyle(.secondary)
+          VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
+              Image(systemName: "lock.shield")
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+                .padding(.top, 1)
+              Text("Everything is denied by default. Add a folder rule below to grant access.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .top, spacing: 8) {
+              Image(systemName: "folder.badge.gearshape")
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+                .padding(.top, 1)
+              Text("Each rule grants read or write access to that folder and everything inside it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .top, spacing: 8) {
+              Image(systemName: "arrow.down.right")
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+                .padding(.top, 1)
+              Text("Need an exception? Add a child-folder rule — it overrides the parent automatically.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
           }
           .padding(4)
         }
