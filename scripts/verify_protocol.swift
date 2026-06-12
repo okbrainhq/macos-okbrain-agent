@@ -240,7 +240,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
     to: handler
   )
   expect(search.ok, "fs.search should be ok")
-  expectEqual(search.data?.matches.first?.path, "src/app.txt", "search match path")
+  expectEqual(search.data?.matches.first?.file, "src/app.txt", "search match file")
   expectEqual(search.data?.matches.first?.line, 2, "search match line")
 
   let fileSearch: Envelope<FileSearchPayload> = try send(
@@ -254,7 +254,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
   )
   expect(fileSearch.ok, "fs.search should accept a single-file path")
   expect(fileSearch.data?.matches.count == 1, "single-file search should return one match")
-  expectEqual(fileSearch.data?.matches.first?.path, "src/app.txt", "single-file search match path")
+  expectEqual(fileSearch.data?.matches.first?.file, "app.txt", "single-file search match file")
   expectEqual(fileSearch.data?.matches.first?.line, 3, "single-file search match line")
 
   let list: Envelope<FileListPayload> = try send(
@@ -268,6 +268,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
   )
   expect(list.ok, "fs.list should be ok")
   expect(list.data?.entries.contains(where: { $0.path == "src/app.txt" }) == true, "list should include file")
+  expect(list.data?.entries.contains(where: { $0.name == "src/app.txt" }) == true, "list should include file name")
 
   let escape: Envelope<EmptyPayload> = try send(
     AgentRequest(

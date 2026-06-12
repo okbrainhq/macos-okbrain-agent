@@ -24,23 +24,28 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
   }
 
   public func describeWorkspace(_ params: AgentRequestParams) throws -> WorkspaceDescribePayload {
-    let root = try validatedRoot(for: params.root, requireExisting: false)
-    try ensureReadable(path: root.canonicalPath)
-    let exists = isDirectory(root.canonicalPath)
+    guard configuration.enabled else {
+      throw AgentProtocolError.rootNotAllowed("File editing is disabled")
+    }
+    let canonical = try resolveAbsolute(params.path, defaultPath: nil)
+    let decision = permissionEngine.decision(for: canonical)
+    guard decision.canRead else {
+      throw AgentProtocolError.rootNotAllowed("No permission rule allows read access to: \(canonical)")
+    }
+    let exists = isDirectory(canonical)
     return WorkspaceDescribePayload(
-      root: root.canonicalPath,
+      root: canonical,
       exists: exists,
-      mode: root.mode,
-      caseSensitive: caseSensitiveVolume(at: root.canonicalPath),
-      vcs: detectVCS(root: root.canonicalPath)
+      caseSensitive: caseSensitiveVolume(at: canonical),
+      vcs: detectVCS(root: canonical)
     )
   }
 
   public func stat(_ params: AgentRequestParams) throws -> FileStatPayload {
-    let resolved = try resolve(params, defaultPath: nil, requireExistingRoot: true)
+    let resolved = try resolve(params, defaultPath: nil)
     try ensureReadable(resolved)
     guard let info = lstatInfo(resolved.url.path) else {
-      throw AgentProtocolError.fileNotFound("Target does not exist: \(resolved.relativePath)")
+      throw AgentProtocolError.fileNotFound("Target does not exist: \(resolved.url.path)")
     }
 
     let type = fileType(info)
@@ -54,7 +59,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     return FileStatPayload(
-      path: resolved.relativePath,
+      path: resolved.url.path,
       type: type,
       size: Int64(info.st_size),
       mtime: iso8601Date(from: info),
@@ -65,13 +70,13 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
   }
 
   public func list(_ params: AgentRequestParams) throws -> FileListPayload {
-    let resolved = try resolve(params, defaultPath: ".", requireExistingRoot: true)
+    let resolved = try resolve(params, defaultPath: nil)
     try ensureReadable(resolved)
     guard let info = lstatInfo(resolved.url.path) else {
-      throw AgentProtocolError.fileNotFound("Directory does not exist: \(resolved.relativePath)")
+      throw AgentProtocolError.fileNotFound("Directory does not exist: \(resolved.url.path)")
     }
     guard fileType(info) == "directory" else {
-      throw AgentProtocolError.notADirectory("List target is not a directory: \(resolved.relativePath)")
+      throw AgentProtocolError.notADirectory("List target is not a directory: \(resolved.url.path)")
     }
 
     let recursive = params.recursive ?? false
@@ -101,8 +106,10 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
         return
       }
 
+      let entryRelative = relativePath(for: url.path, root: resolved.url.path)
       entries.append(FileListEntryPayload(
-        path: relative,
+        name: entryRelative,
+        path: entryRelative,
         type: fileType(entryInfo),
         size: Int64(entryInfo.st_size),
         mtime: iso8601Date(from: entryInfo)
@@ -149,13 +156,13 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
   }
 
   public func read(_ params: AgentRequestParams) throws -> FileReadPayload {
-    let resolved = try resolve(params, defaultPath: nil, requireExistingRoot: true)
+    let resolved = try resolve(params, defaultPath: nil)
     try ensureReadable(resolved)
     guard let info = lstatInfo(resolved.url.path) else {
-      throw AgentProtocolError.fileNotFound("File does not exist: \(resolved.relativePath)")
+      throw AgentProtocolError.fileNotFound("File does not exist: \(resolved.url.path)")
     }
     guard fileType(info) == "file" else {
-      throw AgentProtocolError.notAFile("Read target is not a file: \(resolved.relativePath)")
+      throw AgentProtocolError.notAFile("Read target is not a file: \(resolved.url.path)")
     }
 
     try validateTextEncoding(params.encoding)
@@ -187,7 +194,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     return FileReadPayload(
-      path: resolved.relativePath,
+      path: resolved.url.path,
       content: selectedContent,
       encoding: "utf-8",
       lineCount: totalLines,
@@ -198,7 +205,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
   }
 
   public func write(_ params: AgentRequestParams) throws -> FileWritePayload {
-    let resolved = try resolve(params, defaultPath: nil, requireExistingRoot: true)
+    let resolved = try resolve(params, defaultPath: nil)
     try ensureWritable(resolved)
     try validateTextEncoding(params.encoding)
 
@@ -214,7 +221,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
 
     let existingInfo = lstatInfo(resolved.url.path)
     if let existingInfo, fileType(existingInfo) != "file" {
-      throw AgentProtocolError.notAFile("Write target is not a file: \(resolved.relativePath)")
+      throw AgentProtocolError.notAFile("Write target is not a file: \(resolved.url.path)")
     }
 
     let previousData = existingInfo == nil ? nil : try readData(at: resolved.url, maxBytes: configuration.limits.maxReadBytes)
@@ -228,7 +235,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
       try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
       try rejectSymlinkComponents(relativePath: parentRelativePath(for: resolved.relativePath), rootPath: resolved.rootPath)
     } else if !isDirectory(parentURL.path) {
-      throw AgentProtocolError.fileNotFound("Parent directory does not exist: \(parentRelativePath(for: resolved.relativePath))")
+      throw AgentProtocolError.fileNotFound("Parent directory does not exist: \(parentURL.path)")
     }
 
     let backupPath = (params.backup ?? false) && existingInfo != nil ? try backupExistingFile(resolved) : nil
@@ -236,7 +243,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     try atomicWrite(data, to: resolved.url, permissions: permissions)
 
     return FileWritePayload(
-      path: resolved.relativePath,
+      path: resolved.url.path,
       bytesWritten: data.count,
       previousSha256: previousSha,
       sha256: sha256Hex(data),
@@ -245,7 +252,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
   }
 
   public func patch(_ params: AgentRequestParams) throws -> FilePatchPayload {
-    let resolved = try resolve(params, defaultPath: nil, requireExistingRoot: true)
+    let resolved = try resolve(params, defaultPath: nil)
     try ensureWritable(resolved)
     try validateTextEncoding(params.encoding)
 
@@ -254,10 +261,10 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     guard let info = lstatInfo(resolved.url.path) else {
-      throw AgentProtocolError.fileNotFound("File does not exist: \(resolved.relativePath)")
+      throw AgentProtocolError.fileNotFound("File does not exist: \(resolved.url.path)")
     }
     guard fileType(info) == "file" else {
-      throw AgentProtocolError.notAFile("Patch target is not a file: \(resolved.relativePath)")
+      throw AgentProtocolError.notAFile("Patch target is not a file: \(resolved.url.path)")
     }
 
     let data = try readData(at: resolved.url, maxBytes: configuration.limits.maxReadBytes)
@@ -304,7 +311,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     return FilePatchPayload(
-      path: resolved.relativePath,
+      path: resolved.url.path,
       applied: edits.count,
       previousSha256: previousSha,
       sha256: newSha,
@@ -319,10 +326,10 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
       throw AgentProtocolError.invalidRequest("fs.search requires query")
     }
 
-    let resolved = try resolve(params, defaultPath: ".", requireExistingRoot: true)
+    let resolved = try resolve(params, defaultPath: nil)
     try ensureReadable(resolved)
     guard let targetInfo = lstatInfo(resolved.url.path) else {
-      throw AgentProtocolError.fileNotFound("Search target does not exist: \(resolved.relativePath)")
+      throw AgentProtocolError.fileNotFound("Search target does not exist: \(resolved.url.path)")
     }
 
     let includeHidden = params.includeHidden ?? false
@@ -336,11 +343,11 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     var matches: [FileSearchMatchPayload] = []
     var truncated = false
 
-    func appendMatches(in url: URL, relative: String, info: Darwin.stat) {
+    func appendMatches(in url: URL, filterRelative: String, fileRelative: String, info: Darwin.stat) {
       guard fileType(info) == "file" else {
         return
       }
-      guard globMatches(glob, relativePath: relative, basename: url.lastPathComponent) else {
+      guard globMatches(glob, relativePath: filterRelative, basename: url.lastPathComponent) else {
         return
       }
       guard info.st_size <= configuration.limits.maxReadBytes else {
@@ -370,7 +377,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
 
         if isMatch {
           if matches.count < maxResults {
-            matches.append(FileSearchMatchPayload(path: relative, line: lineNo, text: line))
+            matches.append(FileSearchMatchPayload(file: fileRelative, line: lineNo, text: line))
           } else {
             truncated = true
             stop = true
@@ -408,70 +415,59 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
           continue
         }
 
-        appendMatches(in: url, relative: relative, info: info)
+        let searchRelative = relativePath(for: url.path, root: resolved.url.path)
+        appendMatches(in: url, filterRelative: relative, fileRelative: searchRelative, info: info)
         if truncated {
           break
         }
       }
     case "file":
       if shouldInclude(relativePath: resolved.relativePath, includeHidden: includeHidden, ignoreMatcher: ignoreMatcher) {
-        appendMatches(in: resolved.url, relative: resolved.relativePath, info: targetInfo)
+        appendMatches(in: resolved.url, filterRelative: resolved.relativePath, fileRelative: resolved.url.lastPathComponent, info: targetInfo)
       }
     default:
-      throw AgentProtocolError.notAFile("Search target is not a file or directory: \(resolved.relativePath)")
+      throw AgentProtocolError.notAFile("Search target is not a file or directory: \(resolved.url.path)")
     }
 
     return FileSearchPayload(matches: matches, truncated: truncated)
   }
 
-  private func validatedRoot(for rawRoot: String?, requireExisting: Bool) throws -> RootContext {
+  private func resolveAbsolute(_ rawPath: String?, defaultPath: String?) throws -> String {
+    guard let raw = (rawPath ?? defaultPath)?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+      throw AgentProtocolError.invalidRequest("File action requires path")
+    }
+    let expanded = (raw as NSString).expandingTildeInPath
+    guard (expanded as NSString).isAbsolutePath else {
+      throw AgentProtocolError.invalidRequest("Path must be absolute")
+    }
+    return canonicalPath(expanded)
+  }
+
+  private func resolve(_ params: AgentRequestParams, defaultPath: String?) throws -> ResolvedPath {
     guard configuration.enabled else {
       throw AgentProtocolError.rootNotAllowed("File editing is disabled")
     }
-    guard let rawRoot = rawRoot?.trimmingCharacters(in: .whitespacesAndNewlines), !rawRoot.isEmpty else {
-      throw AgentProtocolError.rootRequired("File actions require root")
+    let canonical = try resolveAbsolute(params.path, defaultPath: defaultPath)
+    let decision = permissionEngine.decision(for: canonical)
+
+    guard decision.mode != .disabled else {
+      throw AgentProtocolError.rootNotAllowed("No permission rule allows access to: \(canonical)")
     }
 
-    let requestedPath = (rawRoot as NSString).expandingTildeInPath
-    guard (requestedPath as NSString).isAbsolutePath else {
-      throw AgentProtocolError.rootNotAllowed("Root must be an absolute path")
+    guard let matchedRule = decision.matchedRule else {
+      throw AgentProtocolError.rootNotAllowed("No permission rule allows access to: \(canonical)")
     }
 
-    let requestedCanonical = canonicalPath(requestedPath)
-    if requireExisting, !isDirectory(requestedCanonical) {
-      throw AgentProtocolError.fileNotFound("Root does not exist: \(requestedCanonical)")
-    }
+    let rootPath = try FilePermissionRuleEngine.normalizedRulePath(matchedRule.path)
+    let relative = relativePath(for: canonical, root: rootPath)
 
-    return RootContext(
-      canonicalPath: requestedCanonical,
-      mode: permissionEngine.decision(for: requestedCanonical).mode
-    )
-  }
-
-  private func resolve(_ params: AgentRequestParams, defaultPath: String?, requireExistingRoot: Bool) throws -> ResolvedPath {
-    let root = try validatedRoot(for: params.root, requireExisting: requireExistingRoot)
-    let rawRelative = (params.path ?? defaultPath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !rawRelative.isEmpty else {
-      throw AgentProtocolError.invalidRequest("File action requires path")
-    }
-    guard !(rawRelative as NSString).isAbsolutePath else {
-      throw AgentProtocolError.pathOutsideRoot("Path must be root-relative")
-    }
-
-    let normalizedRelative = normalizeRelativePath(rawRelative)
-    let rootURL = URL(fileURLWithPath: root.canonicalPath, isDirectory: true)
-    let targetURL = rootURL.appendingPathComponent(normalizedRelative).standardized
-    guard path(targetURL.path, isInsideRoot: root.canonicalPath) else {
-      throw AgentProtocolError.pathOutsideRoot("Resolved path escapes the configured project root")
-    }
-
-    try rejectSymlinkComponents(relativePath: normalizedRelative, rootPath: root.canonicalPath)
+    try rejectSymlinkComponents(relativePath: relative, rootPath: rootPath)
 
     return ResolvedPath(
-      rootPath: root.canonicalPath,
-      relativePath: normalizeResponsePath(relativePath(for: targetURL.path, root: root.canonicalPath)),
-      url: targetURL,
-      mode: permissionEngine.decision(for: targetURL.path).mode
+      rootPath: rootPath,
+      relativePath: relative,
+      url: URL(fileURLWithPath: canonical),
+      mode: decision.mode
     )
   }
 
@@ -832,11 +828,6 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
     return formatter
   }()
-}
-
-private struct RootContext {
-  let canonicalPath: String
-  let mode: FileEditingMode
 }
 
 private struct ResolvedPath {

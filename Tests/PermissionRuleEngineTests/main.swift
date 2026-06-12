@@ -15,7 +15,10 @@ enum PermissionRuleEngineTests {
     try serviceAllowsReadsAndDeniesWritesForReadRule()
     try serviceAllowsNestedWriteOverride()
     try serviceDeniesWriteWhenNestedReadOverridesParentWrite()
-    try statusKeepsAllowedRootsEmptyAndReportsPermissionRules()
+    try statusDoesNotExposePermissionRules()
+    try fsListNonRecursiveReturnsBasenameForNameAndPath()
+    try fsListRecursiveReturnsRelativePathForNameAndPath()
+    try fsSearchReturnsRelativePathForFile()
     print("✅ Permission rule engine + integration tests passed")
   }
 
@@ -151,7 +154,7 @@ enum PermissionRuleEngineTests {
     let service = LocalFileEditingService(configuration: FileEditingConfiguration(enabled: true, mode: .readWrite))
 
     try expectProtocolError("root_not_allowed") {
-      _ = try service.read(AgentRequestParams(root: projectPath, path: "README.md"))
+      _ = try service.read(AgentRequestParams(path: projectPath + "/README.md"))
     }
   }
 
@@ -168,11 +171,11 @@ enum PermissionRuleEngineTests {
       allowedRoots: [FileEditingAllowedRoot(path: projectPath, mode: .readOnly)]
     ))
 
-    let payload = try service.read(AgentRequestParams(root: projectPath, path: "README.md"))
+    let payload = try service.read(AgentRequestParams(path: projectPath + "/README.md"))
     try expect(payload.content == "hello", "Expected read rule to allow reading file content")
 
     try expectProtocolError("permission_denied") {
-      _ = try service.write(AgentRequestParams(root: projectPath, path: "README.md", content: "updated"))
+      _ = try service.write(AgentRequestParams(path: projectPath + "/README.md", content: "updated"))
     }
   }
 
@@ -193,8 +196,7 @@ enum PermissionRuleEngineTests {
     ))
 
     let payload = try service.write(AgentRequestParams(
-      root: projectPath,
-      path: "Editable/Allowed.txt",
+      path: projectPath + "/Editable/Allowed.txt",
       content: "allowed"
     ))
 
@@ -219,15 +221,15 @@ enum PermissionRuleEngineTests {
       ]
     ))
 
-    let payload = try service.read(AgentRequestParams(root: projectPath, path: "Locked/ReadOnly.txt"))
+    let payload = try service.read(AgentRequestParams(path: projectPath + "/Locked/ReadOnly.txt"))
     try expect(payload.content == "locked", "Expected nested read override to still allow reads")
 
     try expectProtocolError("permission_denied") {
-      _ = try service.write(AgentRequestParams(root: projectPath, path: "Locked/ReadOnly.txt", content: "updated"))
+      _ = try service.write(AgentRequestParams(path: projectPath + "/Locked/ReadOnly.txt", content: "updated"))
     }
   }
 
-  private static func statusKeepsAllowedRootsEmptyAndReportsPermissionRules() throws {
+  private static func statusDoesNotExposePermissionRules() throws {
     let fixture = try TemporaryDirectory()
     defer { fixture.remove() }
     let projects = try fixture.makeDirectory("Projects")
@@ -248,13 +250,79 @@ enum PermissionRuleEngineTests {
     let response = try JSONSerialization.jsonObject(with: responseFrame.headerData) as? [String: Any]
     let data = response?["data"] as? [String: Any]
     let fileEditing = data?["fileEditing"] as? [String: Any]
-    let allowedRoots = fileEditing?["allowedRoots"] as? [[String: Any]]
-    let permissionRules = fileEditing?["permissionRules"] as? [[String: Any]]
 
-    try expect(allowedRoots?.isEmpty == true, "Expected status allowedRoots to stay empty")
-    try expect(permissionRules?.count == 1, "Expected status to report one native permission rule")
-    try expect(permissionRules?.first?["path"] as? String == projectsPath, "Expected status permissionRules to include configured rule path")
+    try expect(fileEditing?["enabled"] as? Bool == true, "Expected file editing to be enabled")
+    try expect(fileEditing?["allowedRoots"] == nil, "Expected status to not expose allowedRoots")
+    try expect(fileEditing?["permissionRules"] == nil, "Expected status to not expose permissionRules")
   }
+
+  private static func fsListNonRecursiveReturnsBasenameForNameAndPath() throws {
+    let fixture = try TemporaryDirectory()
+    defer { fixture.remove() }
+    let project = try fixture.makeDirectory("Project")
+    let projectPath = try FilePermissionRuleEngine.normalizedRulePath(project.path)
+    let fileURL = project.appendingPathComponent("README.md")
+    try "hello".write(to: fileURL, atomically: true, encoding: .utf8)
+    let service = LocalFileEditingService(configuration: FileEditingConfiguration(
+      enabled: true,
+      mode: .readWrite,
+      allowedRoots: [FileEditingAllowedRoot(path: projectPath, mode: .readWrite)]
+    ))
+
+    let payload = try service.list(AgentRequestParams(path: projectPath, recursive: false))
+
+    let readme = payload.entries.first { $0.name == "README.md" }
+    try expect(readme != nil, "Expected non-recursive list to include README.md")
+    try expect(readme?.path == "README.md", "Expected non-recursive list path to be basename, got: \(readme?.path ?? "nil")")
+    try expect(readme?.name == "README.md", "Expected non-recursive list name to be basename, got: \(readme?.name ?? "nil")")
+    try expect(!((readme?.path ?? "").hasPrefix("/")), "Expected non-recursive list path to not be absolute")
+  }
+
+  private static func fsListRecursiveReturnsRelativePathForNameAndPath() throws {
+    let fixture = try TemporaryDirectory()
+    defer { fixture.remove() }
+    let project = try fixture.makeDirectory("Project")
+    let src = try fixture.makeDirectory("Project/src")
+    let projectPath = try FilePermissionRuleEngine.normalizedRulePath(project.path)
+    let fileURL = src.appendingPathComponent("app.txt")
+    try "content".write(to: fileURL, atomically: true, encoding: .utf8)
+    let service = LocalFileEditingService(configuration: FileEditingConfiguration(
+      enabled: true,
+      mode: .readWrite,
+      allowedRoots: [FileEditingAllowedRoot(path: projectPath, mode: .readWrite)]
+    ))
+
+    let payload = try service.list(AgentRequestParams(path: projectPath, recursive: true))
+
+    let app = payload.entries.first { $0.name == "src/app.txt" }
+    try expect(app != nil, "Expected recursive list to include src/app.txt")
+    try expect(app?.path == "src/app.txt", "Expected recursive list path to be relative, got: \(app?.path ?? "nil")")
+    try expect(app?.name == "src/app.txt", "Expected recursive list name to be relative, got: \(app?.name ?? "nil")")
+    try expect(!((app?.path ?? "").hasPrefix("/")), "Expected recursive list path to not be absolute")
+  }
+
+  private static func fsSearchReturnsRelativePathForFile() throws {
+    let fixture = try TemporaryDirectory()
+    defer { fixture.remove() }
+    let project = try fixture.makeDirectory("Project")
+    let src = try fixture.makeDirectory("Project/src")
+    let projectPath = try FilePermissionRuleEngine.normalizedRulePath(project.path)
+    let fileURL = src.appendingPathComponent("app.txt")
+    try "hello\nworld\n".write(to: fileURL, atomically: true, encoding: .utf8)
+    let service = LocalFileEditingService(configuration: FileEditingConfiguration(
+      enabled: true,
+      mode: .readWrite,
+      allowedRoots: [FileEditingAllowedRoot(path: projectPath, mode: .readWrite)]
+    ))
+
+    let payload = try service.search(AgentRequestParams(path: projectPath, query: "world"))
+
+    let match = payload.matches.first
+    try expect(match != nil, "Expected search to find a match")
+    try expect(match?.file == "src/app.txt", "Expected search match file to be relative, got: \(match?.file ?? "nil")")
+    try expect(!((match?.file ?? "").hasPrefix("/")), "Expected search match file to not be absolute")
+  }
+
 
   private static func expectProtocolError(_ code: String, operation: () throws -> Void) throws {
     do {

@@ -37,7 +37,6 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
   public var rect: CaptureRect?
 
   // File editing params
-  public var root: String?
   public var path: String?
   public var recursive: Bool?
   public var glob: String?
@@ -67,7 +66,6 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     appName: String? = nil,
     windowId: UInt32? = nil,
     rect: CaptureRect? = nil,
-    root: String? = nil,
     path: String? = nil,
     recursive: Bool? = nil,
     glob: String? = nil,
@@ -96,7 +94,6 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     self.appName = appName
     self.windowId = windowId
     self.rect = rect
-    self.root = root
     self.path = path
     self.recursive = recursive
     self.glob = glob
@@ -127,7 +124,6 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     case appName
     case windowId
     case rect
-    case root
     case path
     case recursive
     case glob
@@ -158,7 +154,6 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     quality = try container.decodeIfPresent(Int.self, forKey: .quality)
     appName = try container.decodeIfPresent(String.self, forKey: .appName)
     rect = try container.decodeIfPresent(CaptureRect.self, forKey: .rect)
-    root = try container.decodeIfPresent(String.self, forKey: .root)
     path = try container.decodeIfPresent(String.self, forKey: .path)
     recursive = try container.decodeIfPresent(Bool.self, forKey: .recursive)
     glob = try container.decodeIfPresent(String.self, forKey: .glob)
@@ -321,18 +316,11 @@ public struct PingPayload: Codable, Equatable, Sendable {
 public struct FileEditingStatusPayload: Codable, Equatable, Sendable {
   public let enabled: Bool
   public let mode: FileEditingMode
-  public let allowedRoots: [FileEditingAllowedRoot]
-  public let permissionRules: [FileEditingAllowedRoot]?
   public let limits: FileEditingLimits
 
   public init(configuration: FileEditingConfiguration) {
     enabled = configuration.enabled
     mode = configuration.mode
-    // Keep this legacy status field unconstrained so clients do not perform
-    // their own exact-root approval checks. The agent enforces permissionRules
-    // natively for every fs.* request.
-    allowedRoots = []
-    permissionRules = configuration.allowedRoots
     limits = configuration.limits
   }
 }
@@ -340,14 +328,12 @@ public struct FileEditingStatusPayload: Codable, Equatable, Sendable {
 public struct WorkspaceDescribePayload: Codable, Equatable, Sendable {
   public let root: String
   public let exists: Bool
-  public let mode: FileEditingMode
   public let caseSensitive: Bool
   public let vcs: VCSInfoPayload?
 
-  public init(root: String, exists: Bool, mode: FileEditingMode, caseSensitive: Bool, vcs: VCSInfoPayload?) {
+  public init(root: String, exists: Bool, caseSensitive: Bool, vcs: VCSInfoPayload?) {
     self.root = root
     self.exists = exists
-    self.mode = mode
     self.caseSensitive = caseSensitive
     self.vcs = vcs
   }
@@ -394,12 +380,14 @@ public struct FileListPayload: Codable, Equatable, Sendable {
 }
 
 public struct FileListEntryPayload: Codable, Equatable, Sendable {
+  public let name: String
   public let path: String
   public let type: String
   public let size: Int64
   public let mtime: String
 
-  public init(path: String, type: String, size: Int64, mtime: String) {
+  public init(name: String, path: String, type: String, size: Int64, mtime: String) {
+    self.name = name
     self.path = path
     self.type = type
     self.size = size
@@ -500,12 +488,12 @@ public struct FileSearchPayload: Codable, Equatable, Sendable {
 }
 
 public struct FileSearchMatchPayload: Codable, Equatable, Sendable {
-  public let path: String
+  public let file: String
   public let line: Int
   public let text: String
 
-  public init(path: String, line: Int, text: String) {
-    self.path = path
+  public init(file: String, line: Int, text: String) {
+    self.file = file
     self.line = line
     self.text = text
   }
