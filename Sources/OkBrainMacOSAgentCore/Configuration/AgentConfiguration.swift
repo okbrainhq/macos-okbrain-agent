@@ -86,11 +86,14 @@ public struct AgentConfiguration: Equatable, Sendable {
   public static let protocolName = "okbrain.macos-agent.v3"
   public static let supportedProtocolVersions = [protocolName]
   public static let defaultSocketPath = "/tmp/okbrain-macos-agent.sock"
+  public static let defaultDevSocketPath = "/tmp/okbrain-macos-agent-dev.sock"
   public static let defaultVersion = "2.0.0"
 
   public let socketPath: String
   public let version: String
   public let build: String
+  public let appEnvironment: String
+  public let stateDirectoryName: String
   public let maxScreenshotBytes: Int
   public let maxRequestBytes: Int
   public let fileEditing: FileEditingConfiguration
@@ -99,6 +102,8 @@ public struct AgentConfiguration: Equatable, Sendable {
     socketPath: String = AgentConfiguration.defaultSocketPath,
     version: String = AgentConfiguration.defaultVersion,
     build: String = "dev",
+    appEnvironment: String = "prod",
+    stateDirectoryName: String = ".okbrain-macos-agent",
     maxScreenshotBytes: Int = 64 * 1024 * 1024,
     maxRequestBytes: Int = 6 * 1024 * 1024,
     fileEditing: FileEditingConfiguration = .disabled
@@ -106,6 +111,8 @@ public struct AgentConfiguration: Equatable, Sendable {
     self.socketPath = socketPath
     self.version = version
     self.build = build
+    self.appEnvironment = appEnvironment
+    self.stateDirectoryName = stateDirectoryName
     self.maxScreenshotBytes = maxScreenshotBytes
     self.maxRequestBytes = maxRequestBytes
     self.fileEditing = fileEditing
@@ -117,11 +124,18 @@ public struct AgentConfiguration: Equatable, Sendable {
     fileEditingEnabled: Bool = false,
     filePermissionRules: [FileEditingAllowedRoot] = []
   ) -> AgentConfiguration {
+    let info = bundle.infoDictionary ?? [:]
+    let appEnvironment = normalizedAppEnvironment(info["AppEnvironment"] as? String, bundleIdentifier: bundle.bundleIdentifier)
+    let stateDirectoryName = normalizedStateDirectoryName(
+      info["AppStateDirectoryName"] as? String,
+      appEnvironment: appEnvironment
+    )
+
     let configuredSocketPath = environment["MACOS_AGENT_SOCKET_PATH"]?
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    let socketPath = configuredSocketPath?.isEmpty == false ? configuredSocketPath! : defaultSocketPath
+    let channelDefaultSocketPath = appEnvironment == "dev" ? defaultDevSocketPath : defaultSocketPath
+    let socketPath = configuredSocketPath?.isEmpty == false ? configuredSocketPath! : channelDefaultSocketPath
 
-    let info = bundle.infoDictionary ?? [:]
     let version = info["CFBundleShortVersionString"] as? String ?? defaultVersion
     let build = info["CFBundleVersion"] as? String ?? "dev"
 
@@ -144,6 +158,8 @@ public struct AgentConfiguration: Equatable, Sendable {
       socketPath: socketPath,
       version: version,
       build: build,
+      appEnvironment: appEnvironment,
+      stateDirectoryName: stateDirectoryName,
       maxRequestBytes: maxRequestBytes,
       fileEditing: fileEditing
     )
@@ -168,10 +184,28 @@ public struct AgentConfiguration: Equatable, Sendable {
       socketPath: socketPath,
       version: version,
       build: build,
+      appEnvironment: appEnvironment,
+      stateDirectoryName: stateDirectoryName,
       maxScreenshotBytes: maxScreenshotBytes,
       maxRequestBytes: max(maxRequestBytes, minimumRequestBytes),
       fileEditing: nextFileEditing
     )
+  }
+
+  private static func normalizedAppEnvironment(_ raw: String?, bundleIdentifier: String?) -> String {
+    let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if value == "dev" || bundleIdentifier?.hasSuffix(".dev") == true {
+      return "dev"
+    }
+    return "prod"
+  }
+
+  private static func normalizedStateDirectoryName(_ raw: String?, appEnvironment: String) -> String {
+    let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let value, !value.isEmpty {
+      return value
+    }
+    return appEnvironment == "dev" ? ".okbrain-macos-agent-dev" : ".okbrain-macos-agent"
   }
 
   private static func positiveInt(_ raw: String?) -> Int? {

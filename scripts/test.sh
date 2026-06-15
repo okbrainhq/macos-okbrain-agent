@@ -3,10 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="OkBrainMacOSAgent"
-APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
-APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
-APP_ICON="$APP_BUNDLE/Contents/Resources/$APP_NAME.icns"
+DEV_APP_NAME="$APP_NAME-Dev"
+PROD_APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
+DEV_APP_BUNDLE="$ROOT_DIR/dist/$DEV_APP_NAME.app"
+PROD_APP_BINARY="$PROD_APP_BUNDLE/Contents/MacOS/$APP_NAME"
+DEV_APP_BINARY="$DEV_APP_BUNDLE/Contents/MacOS/$DEV_APP_NAME"
+PROD_INFO_PLIST="$PROD_APP_BUNDLE/Contents/Info.plist"
+DEV_INFO_PLIST="$DEV_APP_BUNDLE/Contents/Info.plist"
+PROD_APP_ICON="$PROD_APP_BUNDLE/Contents/Resources/$APP_NAME.icns"
+DEV_APP_ICON="$DEV_APP_BUNDLE/Contents/Resources/$DEV_APP_NAME.icns"
 SWIFTPM_CACHE="$ROOT_DIR/.build/swiftpm-cache"
 SWIFTPM_FLAGS=(--disable-sandbox --cache-path "$SWIFTPM_CACHE")
 CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.build/clang-module-cache"
@@ -50,14 +55,28 @@ done < <(find "$ROOT_DIR/scripts" -type f -name '*.sh' | sort)
 
 section "App bundle build"
 "$ROOT_DIR/scripts/build.sh" >/dev/null
+"$ROOT_DIR/scripts/build.sh" --prod >/dev/null
 
 section "App bundle contents"
-test -d "$APP_BUNDLE"
-test -x "$APP_BINARY"
-test -f "$INFO_PLIST"
-test -f "$APP_ICON"
-/usr/bin/plutil -lint "$INFO_PLIST" >/dev/null
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")" = "com.okbrain.macos-agent"
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")" = "2.0.0"
+test -d "$DEV_APP_BUNDLE"
+test -x "$DEV_APP_BINARY"
+test -f "$DEV_INFO_PLIST"
+test -f "$DEV_APP_ICON"
+/usr/bin/plutil -lint "$DEV_INFO_PLIST" >/dev/null
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$DEV_INFO_PLIST")" = "com.okbrain.macos-agent.dev"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$DEV_INFO_PLIST")" = "OkBrainMacOSAgent-Dev"
+test "$(/usr/libexec/PlistBuddy -c 'Print :AppEnvironment' "$DEV_INFO_PLIST")" = "dev"
+test "$(/usr/libexec/PlistBuddy -c 'Print :AppStateDirectoryName' "$DEV_INFO_PLIST")" = ".okbrain-macos-agent-dev"
+
+test -d "$PROD_APP_BUNDLE"
+test -x "$PROD_APP_BINARY"
+test -f "$PROD_INFO_PLIST"
+test -f "$PROD_APP_ICON"
+/usr/bin/plutil -lint "$PROD_INFO_PLIST" >/dev/null
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PROD_INFO_PLIST")" = "com.okbrain.macos-agent"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PROD_INFO_PLIST")" = "OkBrainMacOSAgent"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PROD_INFO_PLIST")" = "2.0.0"
+test "$(/usr/libexec/PlistBuddy -c 'Print :AppEnvironment' "$PROD_INFO_PLIST")" = "prod"
+test "$(/usr/libexec/PlistBuddy -c 'Print :AppStateDirectoryName' "$PROD_INFO_PLIST")" = ".okbrain-macos-agent"
 
 echo "Tests passed"

@@ -1,20 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODE="${1:-run}"
-APP_NAME="OkBrainMacOSAgent"
-BUNDLE_ID="com.okbrain.macos-agent"
+MODE="run"
+ENV="dev"
+APP_BASENAME="OkBrainMacOSAgent"
+PROD_BUNDLE_ID="com.okbrain.macos-agent"
+DEV_BUNDLE_ID="com.okbrain.macos-agent.dev"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+for arg in "$@"; do
+  case "$arg" in
+    --dev|dev)
+      ENV="dev"
+      ;;
+    --prod|prod)
+      ENV="prod"
+      ;;
+    run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify)
+      MODE="$arg"
+      ;;
+    *)
+      echo "usage: $0 [--dev|--prod] [run|--debug|--logs|--telemetry|--verify]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$ENV" == "dev" ]]; then
+  APP_NAME="$APP_BASENAME-Dev"
+  EXECUTABLE_NAME="$APP_BASENAME-Dev"
+  BUNDLE_ID="$DEV_BUNDLE_ID"
+else
+  APP_NAME="$APP_BASENAME"
+  EXECUTABLE_NAME="$APP_BASENAME"
+  BUNDLE_ID="$PROD_BUNDLE_ID"
+fi
+
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
-APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 
-"$ROOT_DIR/scripts/build.sh"
+"$ROOT_DIR/scripts/build.sh" "--$ENV"
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+pkill -x "$EXECUTABLE_NAME" >/dev/null 2>&1 || true
 
 open_app() {
-  /usr/bin/open -n "$APP_BUNDLE"
+  if [[ "$ENV" == "dev" ]]; then
+    /usr/bin/open -n "$APP_BUNDLE"
+  else
+    /usr/bin/open "$APP_BUNDLE"
+  fi
 }
 
 case "$MODE" in
@@ -26,7 +61,7 @@ case "$MODE" in
     ;;
   --logs|logs)
     open_app
-    /usr/bin/log stream --info --style compact --predicate "process == \"$APP_NAME\""
+    /usr/bin/log stream --info --style compact --predicate "process == \"$EXECUTABLE_NAME\""
     ;;
   --telemetry|telemetry)
     open_app
@@ -35,10 +70,10 @@ case "$MODE" in
   --verify|verify)
     open_app
     sleep 1
-    pgrep -x "$APP_NAME" >/dev/null
+    pgrep -x "$EXECUTABLE_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [--dev|--prod] [run|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac

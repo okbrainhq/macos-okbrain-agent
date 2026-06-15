@@ -86,15 +86,72 @@ func runProtocolVerifier() throws {
   expect(!wrongProtocol.ok, "wrong protocol should fail")
   expectEqual(wrongProtocol.error?.code, "protocol_mismatch", "protocol mismatch code")
 
+  try runConfigurationVerifier()
   try runFileEditingVerifier(permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .unknown)))
+}
+
+func runConfigurationVerifier() throws {
+  let fileManager = FileManager.default
+  let bundleURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    .appendingPathComponent("okbrain-agent-config-\(UUID().uuidString).bundle", isDirectory: true)
+  let contentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
+  try fileManager.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+  defer { try? fileManager.removeItem(at: bundleURL) }
+
+  let infoPlistURL = contentsURL.appendingPathComponent("Info.plist")
+  let devPlist = """
+  <?xml version=\"1.0\" encoding=\"UTF-8\"?>
+  <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+  <plist version=\"1.0\">
+  <dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.okbrain.macos-agent.dev</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    <key>AppEnvironment</key>
+    <string>dev</string>
+    <key>AppStateDirectoryName</key>
+    <string>.okbrain-macos-agent-dev</string>
+  </dict>
+  </plist>
+  """
+  try devPlist.write(to: infoPlistURL, atomically: true, encoding: .utf8)
+
+  guard let bundle = Bundle(url: bundleURL) else {
+    throw NSError(domain: "Verifier", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not load test bundle"])
+  }
+
+  let devConfiguration = AgentConfiguration.current(environment: [:], bundle: bundle)
+  expectEqual(devConfiguration.appEnvironment, "dev", "dev app environment")
+  expectEqual(devConfiguration.stateDirectoryName, ".okbrain-macos-agent-dev", "dev state directory")
+  expectEqual(devConfiguration.socketPath, AgentConfiguration.defaultDevSocketPath, "dev default socket")
+  let toggledDevConfiguration = devConfiguration.withFileEditingSettings(enabled: true, allowedRoots: [])
+  expectEqual(toggledDevConfiguration.appEnvironment, "dev", "dev app environment after file editing toggle")
+  expectEqual(toggledDevConfiguration.stateDirectoryName, ".okbrain-macos-agent-dev", "dev state directory after file editing toggle")
+
+  let overrideConfiguration = AgentConfiguration.current(
+    environment: ["MACOS_AGENT_SOCKET_PATH": "/tmp/custom-okbrain.sock"],
+    bundle: bundle
+  )
+  expectEqual(overrideConfiguration.socketPath, "/tmp/custom-okbrain.sock", "socket override precedence")
+
+  let prodConfiguration = AgentConfiguration.current(environment: [:], bundle: .main)
+  expectEqual(prodConfiguration.appEnvironment, "prod", "main app environment fallback")
+  expectEqual(prodConfiguration.socketPath, AgentConfiguration.defaultSocketPath, "prod default socket")
 }
 
 func runFileEditingVerifier(permissions: FakePermissionService) throws {
   let fileManager = FileManager.default
-  let rootURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-    .appendingPathComponent("okbrain-agent-fs-\(UUID().uuidString)", isDirectory: true)
+  let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    .appendingPathComponent(".build/okbrain-agent-fs-\(UUID().uuidString)", isDirectory: true)
   try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
   defer { try? fileManager.removeItem(at: rootURL) }
+
+  func absolutePath(_ relativePath: String) -> String {
+    rootURL.appendingPathComponent(relativePath).path
+  }
 
   let ignoredEnvironmentConfiguration = AgentConfiguration.current(
     environment: ["MACOS_AGENT_ALLOWED_ROOTS": rootURL.path],
@@ -132,7 +189,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       protocolName: AgentConfiguration.protocolName,
       id: "fs_workspace",
       action: "workspace.describe",
-      params: AgentRequestParams(root: rootURL.path)
+      params: AgentRequestParams(path: rootURL.path)
     ),
     to: handler
   )
@@ -145,8 +202,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       id: "fs_write",
       action: "fs.write",
       params: AgentRequestParams(
-        root: rootURL.path,
-        path: "src/app.txt",
+        path: absolutePath("src/app.txt"),
         content: "one\nreturn null\nthree\n",
         createDirs: true
       )
@@ -154,7 +210,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
     to: handler
   )
   expect(write.ok, "fs.write should be ok")
-  expectEqual(write.data?.path, "src/app.txt", "write path")
+  expectEqual(write.data?.path, absolutePath("src/app.txt"), "write path")
   expect(write.data?.sha256.isEmpty == false, "write sha")
 
   let read: Envelope<FileReadPayload> = try send(
@@ -162,7 +218,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       protocolName: AgentConfiguration.protocolName,
       id: "fs_read",
       action: "fs.read",
-      params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", startLine: 2, endLine: 2)
+      params: AgentRequestParams(path: absolutePath("src/app.txt"), startLine: 2, endLine: 2)
     ),
     to: handler
   )
@@ -175,8 +231,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       id: "fs_patch",
       action: "fs.patch",
       params: AgentRequestParams(
-        root: rootURL.path,
-        path: "src/app.txt",
+        path: absolutePath("src/app.txt"),
         expectedSha256: write.data?.sha256,
         edits: [FilePatchEdit(oldText: "return null", newText: "return 42", startLine: 2)]
       )
@@ -191,7 +246,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       protocolName: AgentConfiguration.protocolName,
       id: "fs_read_after_patch",
       action: "fs.read",
-      params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", startLine: 1, endLine: 4)
+      params: AgentRequestParams(path: absolutePath("src/app.txt"), startLine: 1, endLine: 4)
     ),
     to: handler
   )
@@ -206,8 +261,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       id: "fs_write_overwrite",
       action: "fs.write",
       params: AgentRequestParams(
-        root: rootURL.path,
-        path: "src/app.txt",
+        path: absolutePath("src/app.txt"),
         content: "one\nreturn 42\ninserted\nthree\n",
         expectedSha256: patch.data?.sha256
       )
@@ -221,7 +275,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       protocolName: AgentConfiguration.protocolName,
       id: "fs_read_after_write",
       action: "fs.read",
-      params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", startLine: 1, endLine: 10)
+      params: AgentRequestParams(path: absolutePath("src/app.txt"), startLine: 1, endLine: 10)
     ),
     to: handler
   )
@@ -235,7 +289,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       protocolName: AgentConfiguration.protocolName,
       id: "fs_search",
       action: "fs.search",
-      params: AgentRequestParams(root: rootURL.path, path: ".", glob: "*.txt", query: "return 42")
+      params: AgentRequestParams(path: rootURL.path, glob: "*.txt", query: "return 42")
     ),
     to: handler
   )
@@ -248,7 +302,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       protocolName: AgentConfiguration.protocolName,
       id: "fs_search_file",
       action: "fs.search",
-      params: AgentRequestParams(root: rootURL.path, path: "src/app.txt", query: "inserted")
+      params: AgentRequestParams(path: absolutePath("src/app.txt"), query: "inserted")
     ),
     to: handler
   )
@@ -262,7 +316,7 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       protocolName: AgentConfiguration.protocolName,
       id: "fs_list",
       action: "fs.list",
-      params: AgentRequestParams(root: rootURL.path, path: ".", recursive: true, glob: "*.txt")
+      params: AgentRequestParams(path: rootURL.path, recursive: true, glob: "*.txt")
     ),
     to: handler
   )
@@ -275,12 +329,12 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
       protocolName: AgentConfiguration.protocolName,
       id: "fs_escape",
       action: "fs.read",
-      params: AgentRequestParams(root: rootURL.path, path: "../outside.txt")
+      params: AgentRequestParams(path: rootURL.deletingLastPathComponent().appendingPathComponent("outside.txt").path)
     ),
     to: handler
   )
   expect(!escape.ok, "root escape should fail")
-  expectEqual(escape.error?.code, "path_outside_root", "root escape error code")
+  expectEqual(escape.error?.code, "root_not_allowed", "root escape error code")
 }
 
 func runSocketVerifier() throws {

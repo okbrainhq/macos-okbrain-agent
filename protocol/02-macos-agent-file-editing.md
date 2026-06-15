@@ -78,8 +78,8 @@ Use the `OKB1` binary frame defined in `protocol/01-macos-agent-ssh-socks-protoc
   "id": "req_01HZ...",
   "ok": false,
   "error": {
-    "code": "path_outside_root",
-    "message": "Resolved path escapes the configured project root"
+    "code": "root_not_allowed",
+    "message": "No permission rule allows access to the requested path"
   }
 }
 ```
@@ -142,12 +142,11 @@ Expected `data`:
 
 ## 📁 Path Model
 
-All file actions use a `root` plus a root-relative `path`.
+All file actions use an absolute `path`. Access is allowed only when that path is inside an agent-configured folder permission rule.
 
 ```json
 {
-  "root": "/Users/arunoda/projects/my-app",
-  "path": "src/app/page.tsx"
+  "path": "/Users/arunoda/projects/my-app/src/app/page.tsx"
 }
 ```
 
@@ -156,9 +155,9 @@ Rules:
 - Access is default-deny unless an agent-configured folder rule matches the effective target path.
 - A read/write folder rule applies to all nested paths unless a more specific child-folder rule overrides it.
 - `agent.status.fileEditing.allowedRoots` is legacy compatibility metadata and is not used for enforcement; native rules are reported as `permissionRules` and enforced by the agent on every `fs.*` request.
-- `root` must be absolute, and `path` must be relative; absolute paths are rejected.
-- The agent must canonicalize `root + path` with realpath-equivalent logic.
-- Reject traversal attempts like `../`, symlink escapes, or paths outside `root`.
+- `path` must be absolute; relative paths are rejected.
+- The agent must canonicalize `path` with realpath-equivalent logic.
+- Reject symlink escapes or paths outside the matched permission rule.
 - Default symlink behavior is `followSymlinks: false` unless the root policy explicitly allows it.
 - Preserve existing file mode and line endings where practical.
 - Text encoding defaults to UTF-8.
@@ -169,7 +168,7 @@ Rules:
 
 ### `workspace.describe`
 
-Verifies that a Code Project root is allowed and returns root metadata.
+Verifies that a Code Project path is allowed and returns workspace metadata.
 
 ```json
 {
@@ -177,7 +176,7 @@ Verifies that a Code Project root is allowed and returns root metadata.
   "id": "req_workspace_1",
   "action": "workspace.describe",
   "params": {
-    "root": "/Users/arunoda/projects/my-app"
+    "path": "/Users/arunoda/projects/my-app"
   }
 }
 ```
@@ -203,8 +202,7 @@ Returns file/directory metadata.
 
 ```json
 {
-  "root": "/Users/arunoda/projects/my-app",
-  "path": "package.json"
+  "path": "/Users/arunoda/projects/my-app/package.json"
 }
 ```
 
@@ -228,8 +226,7 @@ Lists files and directories.
 
 ```json
 {
-  "root": "/Users/arunoda/projects/my-app",
-  "path": "src",
+  "path": "/Users/arunoda/projects/my-app/src",
   "recursive": false,
   "glob": "*.tsx",
   "includeHidden": false,
@@ -260,8 +257,7 @@ Reads text content, optionally by line range.
 
 ```json
 {
-  "root": "/Users/arunoda/projects/my-app",
-  "path": "src/app/page.tsx",
+  "path": "/Users/arunoda/projects/my-app/src/app/page.tsx",
   "startLine": 1,
   "endLine": 120,
   "maxBytes": 1048576,
@@ -273,7 +269,7 @@ Expected `data`:
 
 ```json
 {
-  "path": "src/app/page.tsx",
+  "path": "/Users/arunoda/projects/my-app/src/app/page.tsx",
   "content": "export default function Page() {\n  return null\n}\n",
   "encoding": "utf-8",
   "lineCount": 3,
@@ -294,8 +290,7 @@ Creates or overwrites a file atomically.
 
 ```json
 {
-  "root": "/Users/arunoda/projects/my-app",
-  "path": "src/app/page.tsx",
+  "path": "/Users/arunoda/projects/my-app/src/app/page.tsx",
   "content": "export default function Page() {\n  return <main>Hello</main>\n}\n",
   "encoding": "utf-8",
   "createDirs": true,
@@ -308,7 +303,7 @@ Expected `data`:
 
 ```json
 {
-  "path": "src/app/page.tsx",
+  "path": "/Users/arunoda/projects/my-app/src/app/page.tsx",
   "bytesWritten": 64,
   "previousSha256": "abc123...",
   "sha256": "def456...",
@@ -329,8 +324,7 @@ Applies one or more exact text replacements.
 
 ```json
 {
-  "root": "/Users/arunoda/projects/my-app",
-  "path": "src/app/page.tsx",
+  "path": "/Users/arunoda/projects/my-app/src/app/page.tsx",
   "expectedSha256": "abc123...",
   "edits": [
     {
@@ -349,7 +343,7 @@ Expected `data`:
 
 ```json
 {
-  "path": "src/app/page.tsx",
+  "path": "/Users/arunoda/projects/my-app/src/app/page.tsx",
   "applied": 1,
   "previousSha256": "abc123...",
   "sha256": "def456...",
@@ -373,14 +367,13 @@ Patch rules:
 
 ### `fs.search`
 
-Searches file contents inside a directory or a single file under the root. When `path` points to a directory, the search walks files below it; when `path` points to a file, only that file is searched. `glob` still filters candidate file paths.
+Searches file contents inside a directory or a single file. When `path` points to a directory, the search walks files below it; when `path` points to a file, only that file is searched. `glob` still filters candidate file paths.
 
 ```json
 {
-  "root": "/Users/arunoda/projects/my-app",
   "query": "export default",
   "regex": false,
-  "path": ".",
+  "path": "/Users/arunoda/projects/my-app",
   "glob": "**/*.{ts,tsx}",
   "respectGitignore": true,
   "includeHidden": false,
@@ -427,12 +420,12 @@ Expected `data`:
 
 File editing normally follows regular POSIX permissions for the logged-in user.
 
-If the app is sandboxed, it must use security-scoped bookmarks for approved roots. If a path requires Full Disk Access or another macOS privacy grant, the agent should return:
+If the app is sandboxed, it must use security-scoped bookmarks for approved permission folders. If a path requires Full Disk Access or another macOS privacy grant, the agent should return:
 
 ```json
 {
   "code": "permission_denied",
-  "message": "The macOS agent cannot access this folder. Approve the project root in the macOS app or grant the requested macOS permission."
+  "message": "The macOS agent cannot access this folder. Approve the folder in the macOS app or grant the requested macOS permission."
 }
 ```
 
@@ -448,7 +441,7 @@ Add a Brain-side execution context for Darwin Code Projects:
 
 ```text
 CodeProjectExecutionContext
-  ├─ MacOSAgentFileExecutionContext when v3 fs capabilities are available and root is allowed
+  ├─ MacOSAgentFileExecutionContext when v3 fs capabilities are available and the path is allowed
   └─ Existing SSH execution fallback otherwise
 ```
 
@@ -488,9 +481,9 @@ For Darwin Code Projects, show:
 | `unsupported_protocol` | Agent does not support v3. |
 | `unsupported_action` | Action is unknown or disabled. |
 | `invalid_request` | Malformed params. |
-| `root_required` | Missing `root`. |
-| `root_not_allowed` | Root is not approved in the macOS app. |
-| `path_outside_root` | Canonical path escapes root. |
+| `invalid_request` | Missing, empty, or relative `path`. |
+| `root_not_allowed` | Path is outside approved folders or file editing is disabled. |
+| `path_outside_root` | Legacy code for canonical path escape attempts. |
 | `file_not_found` | Target does not exist. |
 | `not_a_file` | File action targeted a directory. |
 | `not_a_directory` | Directory action targeted a file. |
@@ -520,11 +513,11 @@ For Darwin Code Projects, show:
 Use `TEST_MODE=true` plus `e2e/mock-macos-agent.py`.
 
 - Darwin Code Project detects v3 file capabilities.
-- `read_file` routes through macOS agent when root is allowed.
+- `read_file` routes through macOS agent when the requested path is allowed.
 - `write_file` creates/overwrites files and returns updated SHA.
 - `patch_file` applies exact replacement and conflict detection.
-- `list_files` and `search_files` return root-scoped results.
-- Root escape attempts are denied.
+- `list_files` and `search_files` return permission-scoped results.
+- Permission escape attempts are denied.
 - When v3 agent is unavailable, coding tools fall back to existing SSH execution.
 
 Focused command:

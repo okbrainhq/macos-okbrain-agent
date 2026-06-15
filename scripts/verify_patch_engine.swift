@@ -253,8 +253,7 @@ private func patchPayloadIncludesStartLineFallbackWarning() throws {
   defer { fixture.remove() }
 
   let payload = try fixture.service.patch(AgentRequestParams(
-    root: fixture.rootPath,
-    path: fixture.fileName,
+    path: fixture.filePath,
     edits: [FilePatchEdit(oldText: "two", newText: "three", startLine: 99)]
   ))
 
@@ -269,8 +268,7 @@ private func dryRunReturnsMetadataWithoutWriting() throws {
   defer { fixture.remove() }
 
   let payload = try fixture.service.patch(AgentRequestParams(
-    root: fixture.rootPath,
-    path: fixture.fileName,
+    path: fixture.filePath,
     edits: [FilePatchEdit(oldText: "two", newText: "three", startLine: 2)],
     dryRun: true
   ))
@@ -288,8 +286,7 @@ private func expectedSHAMismatchReturnsContentConflict() throws {
 
   try expectProtocolError("content_conflict") {
     _ = try fixture.service.patch(AgentRequestParams(
-      root: fixture.rootPath,
-      path: fixture.fileName,
+      path: fixture.filePath,
       expectedSha256: "not-the-current-sha",
       edits: [FilePatchEdit(oldText: "one", newText: "two")]
     ))
@@ -301,8 +298,7 @@ private func multiEditSuccessAppliesAllEdits() throws {
   defer { fixture.remove() }
 
   let payload = try fixture.service.patch(AgentRequestParams(
-    root: fixture.rootPath,
-    path: fixture.fileName,
+    path: fixture.filePath,
     edits: [
       FilePatchEdit(oldText: "alpha", newText: "one"),
       FilePatchEdit(oldText: "gamma", newText: "three")
@@ -320,8 +316,7 @@ private func multiEditFailureLeavesFileUnchanged() throws {
 
   try expectProtocolError("patch_not_found") {
     _ = try fixture.service.patch(AgentRequestParams(
-      root: fixture.rootPath,
-      path: fixture.fileName,
+      path: fixture.filePath,
       edits: [
         FilePatchEdit(oldText: "alpha", newText: "one"),
         FilePatchEdit(oldText: "missing", newText: "two")
@@ -362,6 +357,9 @@ private struct PatchFixture {
   let rootURL: URL
   let rootPath: String
   let fileName = "file.txt"
+  var filePath: String {
+    rootURL.appendingPathComponent(fileName).path
+  }
   let service: LocalFileEditingService
 
   init(content: String) throws {
