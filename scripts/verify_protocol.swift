@@ -324,6 +324,96 @@ func runFileEditingVerifier(permissions: FakePermissionService) throws {
   expect(list.data?.entries.contains(where: { $0.path == "src/app.txt" }) == true, "list should include file")
   expect(list.data?.entries.contains(where: { $0.name == "src/app.txt" }) == true, "list should include file name")
 
+  // --- Hidden file/directory tests ---
+  // Create hidden files and directories
+  let hiddenSubdir = absolutePath(".hidden_dir/subdir")
+  try fileManager.createDirectory(at: URL(fileURLWithPath: hiddenSubdir, isDirectory: true), withIntermediateDirectories: true)
+  try "secret content".write(to: URL(fileURLWithPath: absolutePath(".hidden_dir/inside.txt")), atomically: true, encoding: .utf8)
+  try "deep secret".write(to: URL(fileURLWithPath: absolutePath(".hidden_dir/subdir/deep.txt")), atomically: true, encoding: .utf8)
+  try "hidden root".write(to: URL(fileURLWithPath: absolutePath(".hidden_file")), atomically: true, encoding: .utf8)
+  // Create a .git directory to verify it stays excluded via gitignore matcher
+  try fileManager.createDirectory(at: URL(fileURLWithPath: absolutePath(".git"), isDirectory: true), withIntermediateDirectories: true)
+  try "git config".write(to: URL(fileURLWithPath: absolutePath(".git/config")), atomically: true, encoding: .utf8)
+
+  // fs.list should include hidden files by default (includeHidden defaults to true)
+  let listHidden: Envelope<FileListPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolName,
+      id: "fs_list_hidden",
+      action: "fs.list",
+      params: AgentRequestParams(path: rootURL.path, recursive: true)
+    ),
+    to: handler
+  )
+  expect(listHidden.ok, "fs.list with hidden should be ok")
+  expect(
+    listHidden.data?.entries.contains(where: { $0.path == ".hidden_file" }) == true,
+    "list should include hidden file .hidden_file"
+  )
+  expect(
+    listHidden.data?.entries.contains(where: { $0.path == ".hidden_dir/inside.txt" }) == true,
+    "list should include file inside .hidden_dir"
+  )
+  expect(
+    listHidden.data?.entries.contains(where: { $0.path == ".hidden_dir/subdir/deep.txt" }) == true,
+    "list should include file in subdir of .hidden_dir"
+  )
+  // .git must still be excluded by GitignoreMatcher (respectGitignore defaults to true)
+  expect(
+    listHidden.data?.entries.contains(where: { $0.path.hasPrefix(".git") }) == false,
+    "list should exclude .git directory via gitignore matcher"
+  )
+
+  // fs.search should find content inside hidden files by default
+  let searchHidden: Envelope<FileSearchPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolName,
+      id: "fs_search_hidden",
+      action: "fs.search",
+      params: AgentRequestParams(path: rootURL.path, query: "secret")
+    ),
+    to: handler
+  )
+  expect(searchHidden.ok, "fs.search hidden should be ok")
+  expect(
+    searchHidden.data?.matches.contains(where: { $0.file == ".hidden_dir/inside.txt" }) == true,
+    "search should find match inside .hidden_dir"
+  )
+  expect(
+    searchHidden.data?.matches.contains(where: { $0.file == ".hidden_dir/subdir/deep.txt" }) == true,
+    "search should find match inside .hidden_dir/subdir"
+  )
+  // .git must still be excluded from search results
+  expect(
+    searchHidden.data?.matches.contains(where: { $0.file.hasPrefix(".git") }) == false,
+    "search should exclude .git directory via gitignore matcher"
+  )
+
+  // fs.list with includeHidden: false should exclude hidden files
+  let listExcludeHidden: Envelope<FileListPayload> = try send(
+    AgentRequest(
+      protocolName: AgentConfiguration.protocolName,
+      id: "fs_list_exclude",
+      action: "fs.list",
+      params: AgentRequestParams(path: rootURL.path, recursive: true, includeHidden: false)
+    ),
+    to: handler
+  )
+  expect(listExcludeHidden.ok, "fs.list excludeHidden should be ok")
+  expect(
+    listExcludeHidden.data?.entries.contains(where: { $0.path == ".hidden_file" }) == false,
+    "list with includeHidden:false should exclude .hidden_file"
+  )
+  expect(
+    listExcludeHidden.data?.entries.contains(where: { $0.path.hasPrefix(".hidden_dir") }) == false,
+    "list with includeHidden:false should exclude .hidden_dir"
+  )
+  // Regular files should still appear
+  expect(
+    listExcludeHidden.data?.entries.contains(where: { $0.path == "src/app.txt" }) == true,
+    "list with includeHidden:false should still include regular files"
+  )
+
   let escape: Envelope<EmptyPayload> = try send(
     AgentRequest(
       protocolName: AgentConfiguration.protocolName,

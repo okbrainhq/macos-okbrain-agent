@@ -229,7 +229,7 @@ Lists files and directories.
   "path": "/Users/arunoda/projects/my-app/src",
   "recursive": false,
   "glob": "*.tsx",
-  "includeHidden": false,
+  "includeHidden": true,
   "respectGitignore": true,
   "limit": 1000
 }
@@ -376,7 +376,7 @@ Searches file contents inside a directory or a single file. When `path` points t
   "path": "/Users/arunoda/projects/my-app",
   "glob": "**/*.{ts,tsx}",
   "respectGitignore": true,
-  "includeHidden": false,
+  "includeHidden": true,
   "maxResults": 200
 }
 ```

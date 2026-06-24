@@ -80,7 +80,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     }
 
     let recursive = params.recursive ?? false
-    let includeHidden = params.includeHidden ?? false
+    let includeHidden = params.includeHidden ?? true
     let respectGitignore = params.respectGitignore ?? true
     let limit = min(max(params.limit ?? configuration.limits.maxListEntries, 1), configuration.limits.maxListEntries)
     let ignoreMatcher = respectGitignore ? GitignoreMatcher(root: resolved.rootPath, fileManager: fileManager) : nil
@@ -332,7 +332,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
       throw AgentProtocolError.fileNotFound("Search target does not exist: \(resolved.url.path)")
     }
 
-    let includeHidden = params.includeHidden ?? false
+    let includeHidden = params.includeHidden ?? true
     let respectGitignore = params.respectGitignore ?? true
     let maxResults = min(max(params.maxResults ?? configuration.limits.maxSearchResults, 1), configuration.limits.maxSearchResults)
     let ignoreMatcher = respectGitignore ? GitignoreMatcher(root: resolved.rootPath, fileManager: fileManager) : nil
