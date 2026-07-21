@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import IOKit
 import IOKit.pwr_mgt
@@ -30,6 +31,32 @@ final class DisplayWakeAssertion {
     guard active else { return }
     IOPMAssertionRelease(assertionID)
     active = false
+  }
+
+  deinit {
+    release()
+  }
+}
+
+/// Wakes the display only when it is currently asleep, then waits briefly so
+/// the display can become ready. Use to wrap operations that need a live
+/// display (screenshots, accessibility queries, synthetic input events).
+/// When the display is already awake this is a no-op, so there is no added
+/// latency on the hot path.
+final class DisplayWakeGuard {
+  private var assertion: DisplayWakeAssertion?
+
+  init(settleDelay: TimeInterval = 1.0) {
+    guard CGDisplayIsAsleep(CGMainDisplayID()) != 0 else { return }
+    assertion = DisplayWakeAssertion()
+    if settleDelay > 0 {
+      Thread.sleep(forTimeInterval: settleDelay)
+    }
+  }
+
+  func release() {
+    assertion?.release()
+    assertion = nil
   }
 
   deinit {
