@@ -17,12 +17,10 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
 
     // Wake the display briefly so ScreenCaptureKit can capture valid content
     // even when the display has gone to sleep. The assertion is released
-    // automatically when the variable goes out of scope.
-    let displayWake = DisplayWakeAssertion()
+    // automatically when the variable goes out of scope. No-op (no delay)
+    // when the display is already awake.
+    let displayWake = DisplayWakeGuard(settleDelay: 1.0)
     defer { displayWake.release() }
-
-    // Brief delay to let the display fully wake and render a valid frame
-    Thread.sleep(forTimeInterval: 1.0)
 
     let image: CGImage
     switch (params.mode ?? "full").lowercased() {

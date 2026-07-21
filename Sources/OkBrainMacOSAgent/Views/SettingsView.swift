@@ -40,7 +40,7 @@ struct SettingsView: View {
 
             InfoRow(
               icon: "wake",
-              text: "When the display is off, the agent will briefly wake it to take screenshots, then let it sleep again."
+              text: "When the display is off, the agent will briefly wake it to take screenshots and run accessibility commands, then let it sleep again."
             )
 
             InfoRow(

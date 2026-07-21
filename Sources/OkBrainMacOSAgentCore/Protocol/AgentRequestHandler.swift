@@ -84,6 +84,15 @@ public final class AgentRequestHandler: @unchecked Sendable {
       }
       responseProtocol = protocolName
 
+      // Wake the display for accessibility commands so AX queries and
+      // synthetic input events work even when the display has gone to sleep.
+      // No-op (no delay) when the display is already awake.
+      var displayWake: DisplayWakeGuard?
+      if accessibilityActions.contains(action) {
+        displayWake = DisplayWakeGuard(settleDelay: 0.5)
+      }
+      defer { displayWake?.release() }
+
       switch action {
       case "agent.status":
         return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: statusPayload())
