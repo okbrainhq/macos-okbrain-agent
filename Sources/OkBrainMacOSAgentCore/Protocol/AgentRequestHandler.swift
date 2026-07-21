@@ -9,6 +9,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
   private let permissions: PermissionChecking
   private let screenshots: ScreenshotCapturing
   private let fileEditing: FileEditingServicing
+  private let accessibility: AccessibilityServicing
 
   private let envelopeActions: Set<String> = [
     "agent.status",
@@ -27,16 +28,32 @@ public final class AgentRequestHandler: @unchecked Sendable {
     "fs.search"
   ]
 
+  private let accessibilityActions: Set<String> = [
+    "ax.list-apps",
+    "ax.list-windows",
+    "ax.get-tree",
+    "ax.find",
+    "ax.perform",
+    "ax.get-value",
+    "ax.set-value",
+    "ax.type-text",
+    "ax.key-press",
+    "ax.click-at",
+    "ax.scroll"
+  ]
+
   public init(
     configuration: AgentConfiguration,
     permissions: PermissionChecking = SystemPermissionService(),
     screenshots: ScreenshotCapturing = ScreenCaptureKitScreenshotService(),
-    fileEditing: FileEditingServicing? = nil
+    fileEditing: FileEditingServicing? = nil,
+    accessibility: AccessibilityServicing = SystemAccessibilityService()
   ) {
     self.configuration = configuration
     self.permissions = permissions
     self.screenshots = screenshots
     self.fileEditing = fileEditing ?? LocalFileEditingService(configuration: configuration.fileEditing)
+    self.accessibility = accessibility
   }
 
   public func handle(requestData: Data) -> Data {
@@ -57,7 +74,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
         throw AgentProtocolError.invalidRequest("Request action is required")
       }
 
-      guard envelopeActions.contains(action) || fileActions.contains(action) else {
+      guard envelopeActions.contains(action) || fileActions.contains(action) || accessibilityActions.contains(action) else {
         throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
       }
 
@@ -122,6 +139,107 @@ public final class AgentRequestHandler: @unchecked Sendable {
           id: requestID,
           data: fileEditing.search(request.params ?? AgentRequestParams())
         )
+      case "ax.list-apps":
+        try requireAccessibility()
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: accessibility.listApps())
+      case "ax.list-windows":
+        try requireAccessibility()
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: accessibility.listWindows(query: axQuery(request.params))
+        )
+      case "ax.get-tree":
+        try requireAccessibility()
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: accessibility.tree(query: axQuery(request.params))
+        )
+      case "ax.find":
+        try requireAccessibility()
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: accessibility.find(query: axQuery(request.params, defaultDepth: 30), limit: request.params?.maxResults ?? 20)
+        )
+      case "ax.perform":
+        try requireAccessibility()
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: accessibility.perform(query: axQuery(request.params, defaultDepth: 30), action: request.params?.action ?? "press")
+        )
+      case "ax.get-value":
+        try requireAccessibility()
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: accessibility.value(query: axQuery(request.params, defaultDepth: 30))
+        )
+      case "ax.set-value":
+        try requireAccessibility()
+        guard let value = request.params?.value else {
+          throw AgentProtocolError.invalidRequest("value is required for ax.set-value")
+        }
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: accessibility.setValue(query: axQuery(request.params, defaultDepth: 30), value: value)
+        )
+      case "ax.type-text":
+        try requireAccessibility()
+        guard let text = request.params?.text, !text.isEmpty else {
+          throw AgentProtocolError.invalidRequest("text is required for ax.type-text")
+        }
+        try accessibility.typeText(text)
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: AXSimpleResultPayload(action: "ax.type-text", detail: "Typed \(text.count) characters")
+        )
+      case "ax.key-press":
+        try requireAccessibility()
+        guard let key = request.params?.key, !key.isEmpty else {
+          throw AgentProtocolError.invalidRequest("key is required for ax.key-press")
+        }
+        try accessibility.keyPress(key: key, modifiers: request.params?.modifiers ?? [])
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: AXSimpleResultPayload(
+            action: "ax.key-press",
+            detail: "Pressed \((request.params?.modifiers ?? []).joined(separator: "+"))\(request.params?.modifiers?.isEmpty == false ? "+" : "")\(key)"
+          )
+        )
+      case "ax.click-at":
+        try requireAccessibility()
+        guard let x = request.params?.x, let y = request.params?.y else {
+          throw AgentProtocolError.invalidRequest("x and y are required for ax.click-at")
+        }
+        try accessibility.clickAt(x: x, y: y, button: request.params?.button ?? "left", clickCount: request.params?.clickCount ?? 1)
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: AXSimpleResultPayload(action: "ax.click-at", detail: "Clicked at (\(x), \(y))")
+        )
+      case "ax.scroll":
+        try requireAccessibility()
+        try accessibility.scroll(
+          query: axQuery(request.params, defaultDepth: 30),
+          deltaX: request.params?.deltaX ?? 0,
+          deltaY: request.params?.deltaY ?? 0,
+          x: request.params?.x,
+          y: request.params?.y
+        )
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: AXSimpleResultPayload(
+            action: "ax.scroll",
+            detail: "Scrolled by (\(request.params?.deltaX ?? 0), \(request.params?.deltaY ?? 0))"
+          )
+        )
       default:
         throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
       }
@@ -174,6 +292,31 @@ public final class AgentRequestHandler: @unchecked Sendable {
     )
   }
 
+  private func requireAccessibility() throws {
+    guard permissions.currentPermissions().accessibility == .granted else {
+      throw AgentProtocolError.permissionDenied("Accessibility permission is not granted")
+    }
+  }
+
+  private func axQuery(_ params: AgentRequestParams?, defaultDepth: Int = 10) -> AXElementQuery {
+    AXElementQuery(
+      appName: params?.appName,
+      pid: params?.pid,
+      windowTitle: params?.windowTitle,
+      windowIndex: params?.windowIndex,
+      role: params?.role,
+      title: params?.title,
+      label: params?.label,
+      identifier: params?.identifier,
+      valueContains: params?.valueContains,
+      index: params?.index ?? 0,
+      maxDepth: params?.depth ?? defaultDepth,
+      maxElements: params?.maxElements ?? 500,
+      allWindows: params?.allWindows ?? false,
+      scope: params?.scope
+    )
+  }
+
   private func statusPayload() -> AgentStatusPayload {
     let currentPermissions = permissionsWithFileAccess()
     var capabilities = [
@@ -197,10 +340,28 @@ public final class AgentRequestHandler: @unchecked Sendable {
       ])
     }
 
+    if currentPermissions.accessibility == .granted {
+      capabilities.append(contentsOf: [
+        "ax.list-apps",
+        "ax.list-windows",
+        "ax.get-tree",
+        "ax.find",
+        "ax.perform",
+        "ax.get-value",
+        "ax.set-value",
+        "ax.type-text",
+        "ax.key-press",
+        "ax.click-at",
+        "ax.scroll"
+      ])
+    }
+
     return AgentStatusPayload(
       installed: true,
       running: true,
-      available: currentPermissions.screenRecording == .granted || configuration.fileEditing.enabled,
+      available: currentPermissions.screenRecording == .granted
+        || currentPermissions.accessibility == .granted
+        || configuration.fileEditing.enabled,
       version: configuration.version,
       socketPath: configuration.socketPath,
       permissions: currentPermissions,

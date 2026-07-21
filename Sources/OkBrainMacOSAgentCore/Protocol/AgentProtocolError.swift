@@ -23,6 +23,9 @@ public enum AgentProtocolError: Error, Sendable {
   case contentConflict(String)
   case patchNotFound(String)
   case ambiguousPatch(String)
+  case appNotFound(String)
+  case elementNotFound(String)
+  case actionFailed(String)
   case operationTimeout(String)
   case internalError(String)
 
@@ -72,6 +75,12 @@ public enum AgentProtocolError: Error, Sendable {
       "patch_not_found"
     case .ambiguousPatch:
       "ambiguous_patch"
+    case .appNotFound:
+      "app_not_found"
+    case .elementNotFound:
+      "element_not_found"
+    case .actionFailed:
+      "action_failed"
     case .operationTimeout:
       "operation_timeout"
     case .internalError:
@@ -102,6 +111,9 @@ public enum AgentProtocolError: Error, Sendable {
          .contentConflict(let message),
          .patchNotFound(let message),
          .ambiguousPatch(let message),
+         .appNotFound(let message),
+         .elementNotFound(let message),
+         .actionFailed(let message),
          .operationTimeout(let message),
          .internalError(let message):
       message

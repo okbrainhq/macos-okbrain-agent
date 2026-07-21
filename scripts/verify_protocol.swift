@@ -86,12 +86,139 @@ func runProtocolVerifier() throws {
   expect(!wrongProtocol.ok, "wrong protocol should fail")
   expectEqual(wrongProtocol.error?.code, "protocol_mismatch", "protocol mismatch code")
 
+  try runAccessibilityVerifier(configuration: configuration)
+
   try runConfigurationVerifier()
   try runFileEditingVerifier(permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .unknown)))
 }
 
-func runConfigurationVerifier() throws {
-  let fileManager = FileManager.default
+func runAccessibilityVerifier(configuration: AgentConfiguration) throws {
+  let screenshot = CapturedImage(data: Data([0x52, 0x49]), mimeType: "image/webp", width: 1, height: 1)
+  let axPermissions = FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .granted))
+  let handler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: axPermissions,
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    accessibility: FakeAccessibilityService()
+  )
+
+  let status: Envelope<AgentStatusPayload> = try send(
+    AgentRequest(id: "req_ax_status", action: "agent.status", params: AgentRequestParams()),
+    to: handler
+  )
+  expect(status.ok, "ax status should be ok")
+  expect(status.data?.capabilities.contains("ax.find") == true, "ax capabilities should be listed when accessibility is granted")
+
+  let apps: Envelope<AXAppListPayload> = try send(
+    AgentRequest(id: "req_ax_apps", action: "ax.list-apps", params: AgentRequestParams()),
+    to: handler
+  )
+  expect(apps.ok, "ax.list-apps should be ok")
+  expectEqual(apps.data?.apps.first?.name, "TextEdit", "ax.list-apps app name")
+  expectEqual(apps.data?.apps.first?.pid, 4242, "ax.list-apps pid")
+
+  let windows: Envelope<AXWindowListPayload> = try send(
+    AgentRequest(id: "req_ax_windows", action: "ax.list-windows", params: AgentRequestParams(appName: "TextEdit")),
+    to: handler
+  )
+  expect(windows.ok, "ax.list-windows should be ok")
+  expectEqual(windows.data?.windows.first?.title, "Untitled", "ax.list-windows window title")
+
+  let tree: Envelope<AXTreePayload> = try send(
+    AgentRequest(id: "req_ax_tree", action: "ax.get-tree", params: AgentRequestParams(appName: "TextEdit", depth: 4)),
+    to: handler
+  )
+  expect(tree.ok, "ax.get-tree should be ok")
+  expectEqual(tree.data?.root.role, "AXWindow", "ax.get-tree root role")
+  expectEqual(tree.data?.root.children?.first?.title, "OK", "ax.get-tree child title")
+
+  let find: Envelope<AXFindPayload> = try send(
+    AgentRequest(id: "req_ax_find", action: "ax.find", params: AgentRequestParams(appName: "TextEdit", role: "AXButton", title: "OK")),
+    to: handler
+  )
+  expect(find.ok, "ax.find should be ok")
+  expectEqual(find.data?.matches.first?.identifier, "okButton", "ax.find identifier")
+
+  let perform: Envelope<AXPerformPayload> = try send(
+    AgentRequest(id: "req_ax_perform", action: "ax.perform", params: AgentRequestParams(appName: "TextEdit", role: "AXButton", title: "OK", action: "press")),
+    to: handler
+  )
+  expect(perform.ok, "ax.perform should be ok")
+  expectEqual(perform.data?.action, "press", "ax.perform action")
+
+  let getValue: Envelope<AXValuePayload> = try send(
+    AgentRequest(id: "req_ax_get_value", action: "ax.get-value", params: AgentRequestParams(appName: "TextEdit", identifier: "nameField")),
+    to: handler
+  )
+  expect(getValue.ok, "ax.get-value should be ok")
+  expectEqual(getValue.data?.element.value, .string("hello"), "ax.get-value value")
+
+  let setValue: Envelope<AXValuePayload> = try send(
+    AgentRequest(id: "req_ax_set_value", action: "ax.set-value", params: AgentRequestParams(appName: "TextEdit", identifier: "nameField", value: "world")),
+    to: handler
+  )
+  expect(setValue.ok, "ax.set-value should be ok")
+
+  let typeText: Envelope<AXSimpleResultPayload> = try send(
+    AgentRequest(id: "req_ax_type", action: "ax.type-text", params: AgentRequestParams(text: "hello world")),
+    to: handler
+  )
+  expect(typeText.ok, "ax.type-text should be ok")
+
+  let keyPress: Envelope<AXSimpleResultPayload> = try send(
+    AgentRequest(id: "req_ax_key", action: "ax.key-press", params: AgentRequestParams(key: "s", modifiers: ["command"])),
+    to: handler
+  )
+  expect(keyPress.ok, "ax.key-press should be ok")
+
+  let scroll: Envelope<AXSimpleResultPayload> = try send(
+    AgentRequest(id: "req_ax_scroll", action: "ax.scroll", params: AgentRequestParams(appName: "TextEdit", deltaY: 5)),
+    to: handler
+  )
+  expect(scroll.ok, "ax.scroll should be ok")
+
+  let clickAt: Envelope<AXSimpleResultPayload> = try send(
+    AgentRequest(id: "req_ax_click", action: "ax.click-at", params: AgentRequestParams(x: 120, y: 340)),
+    to: handler
+  )
+  expect(clickAt.ok, "ax.click-at should be ok")
+
+  let missingValue: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_ax_set_value_missing", action: "ax.set-value", params: AgentRequestParams(appName: "TextEdit", identifier: "nameField")),
+    to: handler
+  )
+  expect(!missingValue.ok, "ax.set-value without value should fail")
+  expectEqual(missingValue.error?.code, "invalid_request", "missing value error code")
+
+  let missingCoords: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_ax_click_missing", action: "ax.click-at", params: AgentRequestParams(x: 1)),
+    to: handler
+  )
+  expect(!missingCoords.ok, "ax.click-at without y should fail")
+  expectEqual(missingCoords.error?.code, "invalid_request", "missing coords error code")
+
+  let deniedHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .granted, accessibility: .denied)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    accessibility: FakeAccessibilityService()
+  )
+  let denied: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_ax_denied", action: "ax.list-apps", params: AgentRequestParams()),
+    to: deniedHandler
+  )
+  expect(!denied.ok, "ax action should fail without accessibility permission")
+  expectEqual(denied.error?.code, "permission_denied", "ax permission denied code")
+
+  let deniedStatus: Envelope<AgentStatusPayload> = try send(
+    AgentRequest(id: "req_ax_denied_status", action: "agent.status", params: AgentRequestParams()),
+    to: deniedHandler
+  )
+  expect(deniedStatus.ok, "denied status should be ok")
+  expect(deniedStatus.data?.capabilities.contains("ax.find") == false, "ax capabilities must be hidden when accessibility is denied")
+}
+
+func runConfigurationVerifier() throws {  let fileManager = FileManager.default
   let bundleURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
     .appendingPathComponent("okbrain-agent-config-\(UUID().uuidString).bundle", isDirectory: true)
   let contentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
@@ -583,6 +710,94 @@ struct FakeScreenshotService: ScreenshotCapturing {
   func capture(_ params: AgentRequestParams) throws -> CapturedImage {
     capturedImage
   }
+}
+
+struct FakeAccessibilityService: AccessibilityServicing {
+  var apps: [AXAppPayload] = [
+    AXAppPayload(pid: 4242, name: "TextEdit", bundleId: "com.apple.TextEdit", active: true, windowCount: 1)
+  ]
+  var windows = AXWindowListPayload(
+    pid: 4242,
+    app: "TextEdit",
+    windows: [AXWindowPayload(index: 0, title: "Untitled", frame: CaptureRect(x: 10, y: 10, width: 400, height: 300), main: true)]
+  )
+  var findResult = AXFindPayload(
+    matches: [
+      AXElementNode(
+        role: "AXButton", subrole: nil, title: "OK", label: nil, identifier: "okButton",
+        value: nil, valueTruncated: nil,
+        frame: CaptureRect(x: 20, y: 20, width: 80, height: 30),
+        enabled: true, focused: false, children: nil
+      )
+    ],
+    truncated: false
+  )
+  var performResult: AXPerformPayload?
+  var valueResult = AXValuePayload(
+    element: AXElementNode(
+      role: "AXTextField", subrole: nil, title: nil, label: "Name", identifier: "nameField",
+      value: .string("hello"), valueTruncated: nil,
+      frame: CaptureRect(x: 20, y: 60, width: 200, height: 24),
+      enabled: true, focused: true, children: nil
+    )
+  )
+  var treeResult: AXTreePayload?
+
+  func listApps() throws -> AXAppListPayload {
+    AXAppListPayload(apps: apps)
+  }
+
+  func listWindows(query: AXElementQuery) throws -> AXWindowListPayload {
+    windows
+  }
+
+  func tree(query: AXElementQuery) throws -> AXTreePayload {
+    if let treeResult { return treeResult }
+    return AXTreePayload(
+      pid: query.pid ?? 4242,
+      app: query.appName ?? "TextEdit",
+      window: windows.windows.first,
+      truncated: false,
+      root: AXElementNode(
+        role: "AXWindow", subrole: "AXStandardWindow", title: "Untitled", label: nil, identifier: nil,
+        value: nil, valueTruncated: nil,
+        frame: CaptureRect(x: 10, y: 10, width: 400, height: 300),
+        enabled: true, focused: true,
+        children: [
+          AXElementNode(
+            role: "AXButton", subrole: nil, title: "OK", label: nil, identifier: "okButton",
+            value: nil, valueTruncated: nil,
+            frame: CaptureRect(x: 20, y: 20, width: 80, height: 30),
+            enabled: true, focused: false, children: nil
+          )
+        ]
+      )
+    )
+  }
+
+  func find(query: AXElementQuery, limit: Int) throws -> AXFindPayload {
+    findResult
+  }
+
+  func perform(query: AXElementQuery, action: String) throws -> AXPerformPayload {
+    if let performResult { return performResult }
+    return AXPerformPayload(action: action, element: findResult.matches[0])
+  }
+
+  func value(query: AXElementQuery) throws -> AXValuePayload {
+    valueResult
+  }
+
+  func setValue(query: AXElementQuery, value: String) throws -> AXValuePayload {
+    valueResult
+  }
+
+  func typeText(_ text: String) throws {}
+
+  func keyPress(key: String, modifiers: [String]) throws {}
+
+  func clickAt(x: Double, y: Double, button: String, clickCount: Int) throws {}
+  func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?) throws {}
 }
 
 struct Envelope<T: Decodable>: Decodable {
