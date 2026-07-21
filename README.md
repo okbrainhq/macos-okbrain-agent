@@ -1,8 +1,8 @@
 # OkBrain macOS Agent
 
-A macOS menu-bar agent that exposes screenshot capture, accessibility controls, and toggleable file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding and exchanges `OKB1` binary frames.
+A macOS menu-bar agent that exposes screenshot capture, accessibility (AX) GUI control, and toggleable file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding and exchanges `OKB1` binary frames.
 
-See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md) and [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md) for the protocol specifications.
+See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md), [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md), and [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md) for the protocol specifications.
 
 ## Requirements
 
@@ -46,6 +46,10 @@ Both app plists include `AppEnvironment` and `AppStateDirectoryName`. `MACOS_AGE
 
 The agent starts a Unix socket for the selected mode (`/tmp/okbrain-macos-agent-dev.sock` for dev, `/tmp/okbrain-macos-agent.sock` for prod) and listens for `OKB1` binary-framed requests. Screenshots are encoded locally as WebP quality 80 and returned as binary response bodies. By default, it starts a per-process `ProcessInfo` activity with idle system sleep disabled while the agent is active (display sleep is allowed, so the screen can turn off normally), without changing global `pmset` settings or requiring sudo.
 
+## Accessibility (AX) API
+
+When Accessibility permission is granted, the agent serves eleven `ax.*` actions for GUI automation: `ax.list-apps`, `ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.perform`, `ax.get-value`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, and `ax.scroll`. Agents target elements with a query (`appName`/`pid` + `role`/`title`/`label`/`identifier`/`valueContains`), so no persistent handles or coordinates are required. See [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md) for the full spec and Brain-side integration guide.
+
 ## File Editing
 
 File editing is disabled by default. Enable or disable it from the app's **Settings → File Editing** switch.
@@ -67,7 +71,7 @@ This repository uses executable Swift verifiers for protocol and patch coverage,
 The app requires two macOS privacy permissions:
 
 - **Screen Recording** — for `screenshot.capture`
-- **Accessibility** — for future window/region targeting
+- **Accessibility** — for the `ax.*` GUI control actions
 
 These are requested automatically on first launch. If you rebuild without code signing, you must re-grant them every time.
 

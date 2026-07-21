@@ -58,6 +58,32 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
   public var regex: Bool?
   public var maxResults: Int?
 
+  // Accessibility params
+  public var pid: Int32?
+  public var windowTitle: String?
+  public var windowIndex: Int?
+  public var role: String?
+  public var title: String?
+  public var label: String?
+  public var identifier: String?
+  public var valueContains: String?
+  public var index: Int?
+  public var value: String?
+  public var depth: Int?
+  public var maxElements: Int?
+  public var allWindows: Bool?
+  public var scope: String?
+  public var action: String?
+  public var x: Double?
+  public var y: Double?
+  public var button: String?
+  public var clickCount: Int?
+  public var key: String?
+  public var modifiers: [String]?
+  public var text: String?
+  public var deltaX: Int?
+  public var deltaY: Int?
+
   public init(
     mode: String? = nil,
     format: String? = nil,
@@ -85,7 +111,31 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     dryRun: Bool? = nil,
     query: String? = nil,
     regex: Bool? = nil,
-    maxResults: Int? = nil
+    maxResults: Int? = nil,
+    pid: Int32? = nil,
+    windowTitle: String? = nil,
+    windowIndex: Int? = nil,
+    role: String? = nil,
+    title: String? = nil,
+    label: String? = nil,
+    identifier: String? = nil,
+    valueContains: String? = nil,
+    index: Int? = nil,
+    value: String? = nil,
+    depth: Int? = nil,
+    maxElements: Int? = nil,
+    allWindows: Bool? = nil,
+    scope: String? = nil,
+    action: String? = nil,
+    x: Double? = nil,
+    y: Double? = nil,
+    button: String? = nil,
+    clickCount: Int? = nil,
+    key: String? = nil,
+    modifiers: [String]? = nil,
+    text: String? = nil,
+    deltaX: Int? = nil,
+    deltaY: Int? = nil
   ) {
     self.mode = mode
     self.format = format
@@ -114,6 +164,30 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     self.query = query
     self.regex = regex
     self.maxResults = maxResults
+    self.pid = pid
+    self.windowTitle = windowTitle
+    self.windowIndex = windowIndex
+    self.role = role
+    self.title = title
+    self.label = label
+    self.identifier = identifier
+    self.valueContains = valueContains
+    self.index = index
+    self.value = value
+    self.depth = depth
+    self.maxElements = maxElements
+    self.allWindows = allWindows
+    self.scope = scope
+    self.action = action
+    self.x = x
+    self.y = y
+    self.button = button
+    self.clickCount = clickCount
+    self.key = key
+    self.modifiers = modifiers
+    self.text = text
+    self.deltaX = deltaX
+    self.deltaY = deltaY
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -144,6 +218,30 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     case query
     case regex
     case maxResults
+    case pid
+    case windowTitle
+    case windowIndex
+    case role
+    case title
+    case label
+    case identifier
+    case valueContains
+    case index
+    case value
+    case depth
+    case maxElements
+    case allWindows
+    case scope
+    case action
+    case x
+    case y
+    case button
+    case clickCount
+    case key
+    case modifiers
+    case text
+    case deltaX
+    case deltaY
   }
 
   public init(from decoder: Decoder) throws {
@@ -174,6 +272,30 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     query = try container.decodeIfPresent(String.self, forKey: .query)
     regex = try container.decodeIfPresent(Bool.self, forKey: .regex)
     maxResults = try container.decodeIfPresent(Int.self, forKey: .maxResults)
+    pid = try container.decodeIfPresent(Int32.self, forKey: .pid)
+    windowTitle = try container.decodeIfPresent(String.self, forKey: .windowTitle)
+    windowIndex = try container.decodeIfPresent(Int.self, forKey: .windowIndex)
+    role = try container.decodeIfPresent(String.self, forKey: .role)
+    title = try container.decodeIfPresent(String.self, forKey: .title)
+    label = try container.decodeIfPresent(String.self, forKey: .label)
+    identifier = try container.decodeIfPresent(String.self, forKey: .identifier)
+    valueContains = try container.decodeIfPresent(String.self, forKey: .valueContains)
+    index = try container.decodeIfPresent(Int.self, forKey: .index)
+    value = try container.decodeIfPresent(String.self, forKey: .value)
+    depth = try container.decodeIfPresent(Int.self, forKey: .depth)
+    maxElements = try container.decodeIfPresent(Int.self, forKey: .maxElements)
+    allWindows = try container.decodeIfPresent(Bool.self, forKey: .allWindows)
+    scope = try container.decodeIfPresent(String.self, forKey: .scope)
+    action = try container.decodeIfPresent(String.self, forKey: .action)
+    x = try container.decodeIfPresent(Double.self, forKey: .x)
+    y = try container.decodeIfPresent(Double.self, forKey: .y)
+    button = try container.decodeIfPresent(String.self, forKey: .button)
+    clickCount = try container.decodeIfPresent(Int.self, forKey: .clickCount)
+    key = try container.decodeIfPresent(String.self, forKey: .key)
+    modifiers = try container.decodeIfPresent([String].self, forKey: .modifiers)
+    text = try container.decodeIfPresent(String.self, forKey: .text)
+    deltaX = try container.decodeIfPresent(Int.self, forKey: .deltaX)
+    deltaY = try container.decodeIfPresent(Int.self, forKey: .deltaY)
 
     if let numericWindowID = try? container.decodeIfPresent(UInt32.self, forKey: .windowId) {
       windowId = numericWindowID
