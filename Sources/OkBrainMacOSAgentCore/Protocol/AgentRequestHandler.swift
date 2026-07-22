@@ -10,6 +10,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
   private let screenshots: ScreenshotCapturing
   private let fileEditing: FileEditingServicing
   private let accessibility: AccessibilityServicing
+  private let osascript: OsascriptServicing
 
   private let envelopeActions: Set<String> = [
     "agent.status",
@@ -42,18 +43,24 @@ public final class AgentRequestHandler: @unchecked Sendable {
     "ax.scroll"
   ]
 
+  private let osascriptActions: Set<String> = [
+    "osascript.run"
+  ]
+
   public init(
     configuration: AgentConfiguration,
     permissions: PermissionChecking = SystemPermissionService(),
     screenshots: ScreenshotCapturing = ScreenCaptureKitScreenshotService(),
     fileEditing: FileEditingServicing? = nil,
-    accessibility: AccessibilityServicing = SystemAccessibilityService()
+    accessibility: AccessibilityServicing = SystemAccessibilityService(),
+    osascript: OsascriptServicing = SystemOsascriptService()
   ) {
     self.configuration = configuration
     self.permissions = permissions
     self.screenshots = screenshots
     self.fileEditing = fileEditing ?? LocalFileEditingService(configuration: configuration.fileEditing)
     self.accessibility = accessibility
+    self.osascript = osascript
   }
 
   public func handle(requestData: Data) -> Data {
@@ -74,7 +81,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
         throw AgentProtocolError.invalidRequest("Request action is required")
       }
 
-      guard envelopeActions.contains(action) || fileActions.contains(action) || accessibilityActions.contains(action) else {
+      guard envelopeActions.contains(action) || fileActions.contains(action) || accessibilityActions.contains(action) || osascriptActions.contains(action) else {
         throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
       }
 
@@ -249,6 +256,19 @@ public final class AgentRequestHandler: @unchecked Sendable {
             detail: "Scrolled by (\(request.params?.deltaX ?? 0), \(request.params?.deltaY ?? 0))"
           )
         )
+      case "osascript.run":
+        guard let script = request.params?.script, !script.isEmpty else {
+          throw AgentProtocolError.invalidRequest("script is required for osascript.run")
+        }
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: osascript.run(
+            script: script,
+            language: request.params?.language ?? "applescript",
+            timeout: request.params?.timeout ?? 0
+          )
+        )
       default:
         throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
       }
@@ -334,7 +354,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
       "screenshot.region",
       "screenshot.cursor",
       "screenshot.webp",
-      "screenshot.binary"
+      "screenshot.binary",
+      "osascript.run"
     ]
 
     if configuration.fileEditing.enabled {

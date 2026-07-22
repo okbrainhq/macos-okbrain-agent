@@ -1,8 +1,8 @@
 # OkBrain macOS Agent
 
-A macOS menu-bar agent that exposes screenshot capture, accessibility (AX) GUI control, and toggleable file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding and exchanges `OKB1` binary frames.
+A macOS menu-bar agent that exposes screenshot capture, accessibility (AX) GUI control, AppleScript (`osascript`) execution, and toggleable file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding and exchanges `OKB1` binary frames.
 
-See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md), [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md), and [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md) for the protocol specifications.
+See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md), [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md), [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md), and [`protocol/05-macos-agent-osascript-api.md`](protocol/05-macos-agent-osascript-api.md) for the protocol specifications.
 
 ## Requirements
 
@@ -49,6 +49,12 @@ The agent starts a Unix socket for the selected mode (`/tmp/okbrain-macos-agent-
 ## Accessibility (AX) API
 
 When Accessibility permission is granted, the agent serves eleven `ax.*` actions for GUI automation: `ax.list-apps`, `ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.perform`, `ax.get-value`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, and `ax.scroll`. Agents target elements with a query (`appName`/`pid` + `role`/`title`/`label`/`identifier`/`valueContains`), so no persistent handles or coordinates are required. See [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md) for the full spec and Brain-side integration guide.
+
+## AppleScript / osascript
+
+The agent serves one `osascript.run` action for running AppleScript or JXA snippets through `/usr/bin/osascript`. The script is piped over stdin, so multi-line scripts and embedded quotes need no shell escaping and there is no argument-length limit. Params: `script` (required), `language` (`applescript` by default, or `javascript`/`jxa`), and an optional `timeout` in seconds (default 30, max 300). The response returns `language`, `exitCode`, `stdout`, `stderr`, and `timedOut`.
+
+Controlling another app via AppleScript requires macOS **Automation** permission for that target app. To avoid surprise consent prompts mid-task, pre-authorize apps in **Settings → AppleScript App Access**: add apps from your Applications folder, then click **Request Access** to trigger the system prompt up front. Each app shows a live status (Authorized / Denied / Not Requested), read via `AEDeterminePermissionToAutomateTarget`. Denied apps can be re-approved in System Settings → Privacy & Security → Automation.
 
 ## File Editing
 
