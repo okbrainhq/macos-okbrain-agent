@@ -171,27 +171,24 @@ struct SettingsView: View {
 
           InfoRow(
             icon: "hand.raised",
-            text: "macOS asks for your approval once per app. Add apps below, then click \"Request Access\" to trigger the system prompt ahead of time."
+            text: "macOS asks for your approval once per app, the first time the agent tries to control it. Add apps below to track their permission status."
           )
 
           InfoRow(
             icon: "exclamationmark.triangle",
-            text: "Clicking \"Request Access\" makes macOS show its consent prompt for that app up front, so real tasks aren't blocked later. To re-approve a denied app or revoke an authorized one, use System Settings → Privacy & Security → Automation (button below)."
+            text: "To approve, re-approve, or revoke an app's access, use System Settings → Privacy & Security → Automation (button below). Statuses here refresh automatically when you return to this window."
           )
         }
 
         HStack(spacing: 10) {
           Button("Add Apps…", action: chooseAutomationApps)
 
-          Button("Request All Access", action: store.requestAllAutomationAccess)
-            .buttonStyle(.borderedProminent)
-            .disabled(store.automationApps.isEmpty || store.isRequestingAutomationAccess)
-
           Button {
             openAutomationSystemSettings()
           } label: {
             Label("System Settings", systemImage: "gear")
           }
+          .buttonStyle(.borderedProminent)
           .help("Open System Settings → Privacy & Security → Automation to review or revoke per-app access")
 
           Spacer()
@@ -224,8 +221,6 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
           Text("Status")
             .frame(width: 150, alignment: .leading)
-          Text("Action")
-            .frame(width: 130, alignment: .trailing)
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
@@ -240,9 +235,7 @@ struct SettingsView: View {
             ForEach(store.automationApps) { app in
               AutomationAppRow(
                 app: app,
-                status: store.automationStatuses[app.bundleID] ?? .unknown,
-                isBusy: store.isRequestingAutomationAccess,
-                onRequest: { store.requestAutomationAccess(bundleID: app.bundleID) }
+                status: store.automationStatuses[app.bundleID] ?? .unknown
               )
               Divider()
             }
@@ -305,8 +298,6 @@ private struct InfoRow: View {
 private struct AutomationAppRow: View {
   let app: AutomationAppInfo
   let status: AutomationPermissionStatus
-  let isBusy: Bool
-  let onRequest: () -> Void
 
   var body: some View {
     HStack(spacing: 12) {
@@ -328,11 +319,6 @@ private struct AutomationAppRow: View {
         tint: status.tint
       )
       .frame(width: 150, alignment: .leading)
-
-      Button("Request Access", action: onRequest)
-        .controlSize(.small)
-        .disabled(status == .authorized || isBusy)
-        .frame(width: 130, alignment: .trailing)
     }
     .padding(.horizontal, 10)
     .padding(.vertical, 8)

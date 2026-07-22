@@ -42,7 +42,6 @@ final class AgentRuntimeStore: ObservableObject {
   @Published private(set) var filePermissionRules: [FileEditingAllowedRoot]
   @Published private(set) var automationApps: [AutomationAppInfo]
   @Published private(set) var automationStatuses: [String: AutomationPermissionStatus] = [:]
-  @Published private(set) var isRequestingAutomationAccess = false
   @Published var preventIdleSleepEnabled: Bool {
     didSet {
       guard preventIdleSleepEnabled != oldValue else {
@@ -270,46 +269,6 @@ final class AgentRuntimeStore: ObservableObject {
       statuses[app.bundleID] = automationPermissionService.status(forBundleID: app.bundleID)
     }
     automationStatuses = statuses
-  }
-
-  func requestAutomationAccess(bundleID: String) {
-    guard !isRequestingAutomationAccess else {
-      return
-    }
-
-    isRequestingAutomationAccess = true
-    let service = automationPermissionService
-    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-      let status = service.requestAccess(forBundleID: bundleID)
-      DispatchQueue.main.async {
-        self?.automationStatuses[bundleID] = status
-        self?.isRequestingAutomationAccess = false
-      }
-    }
-  }
-
-  func requestAllAutomationAccess() {
-    let pending = automationApps.filter {
-      automationStatuses[$0.bundleID] != .authorized
-    }
-    guard !pending.isEmpty, !isRequestingAutomationAccess else {
-      return
-    }
-
-    isRequestingAutomationAccess = true
-    let service = automationPermissionService
-    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-      var results: [String: AutomationPermissionStatus] = [:]
-      for app in pending {
-        results[app.bundleID] = service.requestAccess(forBundleID: app.bundleID)
-      }
-      DispatchQueue.main.async {
-        for (bundleID, status) in results {
-          self?.automationStatuses[bundleID] = status
-        }
-        self?.isRequestingAutomationAccess = false
-      }
-    }
   }
 
   func captureFullScreenProbe() {
