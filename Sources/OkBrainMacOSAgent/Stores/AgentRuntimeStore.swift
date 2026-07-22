@@ -30,7 +30,7 @@ final class AgentRuntimeStore: ObservableObject {
   private static let preventIdleSleepDefaultsKey = "preventIdleSleepEnabled"
   private static let fileEditingEnabledDefaultsKey = "fileEditingEnabled"
   private static let filePermissionRulesDefaultsKey = "filePermissionRules"
-  private static let automationAppsDefaultsKey = "automationApps"
+  private static let appleScriptAPIEnabledDefaultsKey = "appleScriptAPIEnabled"
   private static let preventIdleSleepReason = "OkBrain Agent is running and ready for remote screenshots."
 
   @Published private(set) var configuration: AgentConfiguration
@@ -40,8 +40,15 @@ final class AgentRuntimeStore: ObservableObject {
   @Published private(set) var latestProtocolResponse = ""
   @Published private(set) var isCapturing = false
   @Published private(set) var filePermissionRules: [FileEditingAllowedRoot]
-  @Published private(set) var automationApps: [AutomationAppInfo]
-  @Published private(set) var automationStatuses: [String: AutomationPermissionStatus] = [:]
+  @Published var appleScriptAPIEnabled: Bool {
+    didSet {
+      guard appleScriptAPIEnabled != oldValue else {
+        return
+      }
+
+      UserDefaults.standard.set(appleScriptAPIEnabled, forKey: Self.appleScriptAPIEnabledDefaultsKey)
+    }
+  }
   @Published var preventIdleSleepEnabled: Bool {
     didSet {
       guard preventIdleSleepEnabled != oldValue else {
@@ -67,7 +74,6 @@ final class AgentRuntimeStore: ObservableObject {
   private let permissionService = SystemPermissionService()
   private let screenshotService = ScreenCaptureKitScreenshotService()
   private let idleSleepPreventer = IdleSleepPreventer()
-  private let automationPermissionService = SystemAutomationPermissionService()
   private var requestHandler: AgentRequestHandler
   private var server: UnixSocketServer?
   private var isAgentRuntimeActive = false
@@ -75,13 +81,14 @@ final class AgentRuntimeStore: ObservableObject {
   private init() {
     UserDefaults.standard.register(defaults: [
       Self.preventIdleSleepDefaultsKey: true,
-      Self.fileEditingEnabledDefaultsKey: false
+      Self.fileEditingEnabledDefaultsKey: false,
+      Self.appleScriptAPIEnabledDefaultsKey: true
     ])
 
     let preventIdleSleepEnabled = UserDefaults.standard.bool(forKey: Self.preventIdleSleepDefaultsKey)
     let fileEditingEnabled = UserDefaults.standard.bool(forKey: Self.fileEditingEnabledDefaultsKey)
+    let appleScriptAPIEnabled = UserDefaults.standard.bool(forKey: Self.appleScriptAPIEnabledDefaultsKey)
     let filePermissionRules = Self.loadFilePermissionRules()
-    let automationApps = Self.loadAutomationApps()
     let configuration = AgentConfiguration.current(
       fileEditingEnabled: fileEditingEnabled,
       filePermissionRules: filePermissionRules
@@ -89,8 +96,8 @@ final class AgentRuntimeStore: ObservableObject {
     self.configuration = configuration
     self.preventIdleSleepEnabled = preventIdleSleepEnabled
     self.fileEditingEnabled = fileEditingEnabled
+    self.appleScriptAPIEnabled = appleScriptAPIEnabled
     self.filePermissionRules = filePermissionRules
-    self.automationApps = automationApps
     idleSleepPrevention = IdleSleepPreventionSnapshot(
       state: preventIdleSleepEnabled ? .inactive : .disabled,
       activityDescription: nil,
@@ -101,7 +108,8 @@ final class AgentRuntimeStore: ObservableObject {
     requestHandler = AgentRequestHandler(
       configuration: configuration,
       permissions: permissionService,
-      screenshots: screenshotService
+      screenshots: screenshotService,
+      osascriptEnabled: { UserDefaults.standard.bool(forKey: Self.appleScriptAPIEnabledDefaultsKey) }
     )
   }
 
@@ -118,11 +126,10 @@ final class AgentRuntimeStore: ObservableObject {
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      // User may have toggled Automation permissions in System Settings while
+      // User may have toggled permissions in System Settings while
       // we were in the background — re-read statuses when they come back.
       Task { @MainActor [weak self] in
         guard let self else { return }
-        self.refreshAutomationStatuses()
         self.permissions = self.permissionService.currentPermissions()
       }
     }
@@ -203,7 +210,8 @@ final class AgentRuntimeStore: ObservableObject {
     requestHandler = AgentRequestHandler(
       configuration: nextConfiguration,
       permissions: permissionService,
-      screenshots: screenshotService
+      screenshots: screenshotService,
+      osascriptEnabled: { UserDefaults.standard.bool(forKey: Self.appleScriptAPIEnabledDefaultsKey) }
     )
 
     if isAgentRuntimeActive {
@@ -227,49 +235,7 @@ final class AgentRuntimeStore: ObservableObject {
     }
   }
 
-  // MARK: - AppleScript Automation Access
-
-  func addAutomationApps(urls: [URL]) {
-    var added = automationApps
-    for url in urls {
-      guard let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier, !bundleID.isEmpty else {
-        continue
-      }
-      guard !added.contains(where: { $0.bundleID == bundleID }) else {
-        continue
-      }
-      let name = (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
-        ?? (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-        ?? url.deletingPathExtension().lastPathComponent
-      added.append(AutomationAppInfo(bundleID: bundleID, name: name, path: url.path))
-    }
-
-    guard added != automationApps else {
-      return
-    }
-
-    automationApps = added
-    Self.saveAutomationApps(added)
-    refreshAutomationStatuses()
-  }
-
-  func removeAutomationApps(bundleIDs: Set<String>) {
-    guard !bundleIDs.isEmpty else {
-      return
-    }
-
-    automationApps.removeAll { bundleIDs.contains($0.bundleID) }
-    automationStatuses = automationStatuses.filter { !bundleIDs.contains($0.key) }
-    Self.saveAutomationApps(automationApps)
-  }
-
-  func refreshAutomationStatuses() {
-    var statuses: [String: AutomationPermissionStatus] = [:]
-    for app in automationApps {
-      statuses[app.bundleID] = automationPermissionService.status(forBundleID: app.bundleID)
-    }
-    automationStatuses = statuses
-  }
+  // MARK: - Screenshot Probe
 
   func captureFullScreenProbe() {
     guard !isCapturing else {
@@ -385,23 +351,6 @@ final class AgentRuntimeStore: ObservableObject {
     }
 
     UserDefaults.standard.set(data, forKey: filePermissionRulesDefaultsKey)
-  }
-
-  private static func loadAutomationApps() -> [AutomationAppInfo] {
-    guard let data = UserDefaults.standard.data(forKey: automationAppsDefaultsKey),
-          let apps = try? JSONDecoder().decode([AutomationAppInfo].self, from: data) else {
-      return []
-    }
-
-    return apps.filter { !$0.bundleID.isEmpty }
-  }
-
-  private static func saveAutomationApps(_ apps: [AutomationAppInfo]) {
-    guard let data = try? JSONEncoder().encode(apps) else {
-      return
-    }
-
-    UserDefaults.standard.set(data, forKey: automationAppsDefaultsKey)
   }
 
   private static func preview(from responseData: Data) -> ScreenshotPreview? {

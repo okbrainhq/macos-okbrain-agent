@@ -11,6 +11,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
   private let fileEditing: FileEditingServicing
   private let accessibility: AccessibilityServicing
   private let osascript: OsascriptServicing
+  private let osascriptEnabled: @Sendable () -> Bool
 
   private let envelopeActions: Set<String> = [
     "agent.status",
@@ -53,7 +54,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
     screenshots: ScreenshotCapturing = ScreenCaptureKitScreenshotService(),
     fileEditing: FileEditingServicing? = nil,
     accessibility: AccessibilityServicing = SystemAccessibilityService(),
-    osascript: OsascriptServicing = SystemOsascriptService()
+    osascript: OsascriptServicing = SystemOsascriptService(),
+    osascriptEnabled: (@Sendable () -> Bool)? = nil
   ) {
     self.configuration = configuration
     self.permissions = permissions
@@ -61,6 +63,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
     self.fileEditing = fileEditing ?? LocalFileEditingService(configuration: configuration.fileEditing)
     self.accessibility = accessibility
     self.osascript = osascript
+    self.osascriptEnabled = osascriptEnabled ?? { true }
   }
 
   public func handle(requestData: Data) -> Data {
@@ -257,6 +260,9 @@ public final class AgentRequestHandler: @unchecked Sendable {
           )
         )
       case "osascript.run":
+        guard osascriptEnabled() else {
+          throw AgentProtocolError.invalidRequest("AppleScript (osascript) API is disabled in the agent's settings")
+        }
         guard let script = request.params?.script, !script.isEmpty else {
           throw AgentProtocolError.invalidRequest("script is required for osascript.run")
         }
