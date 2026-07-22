@@ -6,8 +6,6 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
   @EnvironmentObject private var store: AgentRuntimeStore
 
-  @State private var selectedAutomationApps = Set<String>()
-
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
@@ -178,7 +176,7 @@ struct SettingsView: View {
 
           InfoRow(
             icon: "exclamationmark.triangle",
-            text: "Clicking \"Request Access\" makes macOS show its consent prompt for that app up front, so real tasks aren't blocked later. Denied apps can be re-approved in System Settings → Privacy & Security → Automation."
+            text: "Clicking \"Request Access\" makes macOS show its consent prompt for that app up front, so real tasks aren't blocked later. To re-approve a denied app or revoke an authorized one, use System Settings → Privacy & Security → Automation (button below)."
           )
         }
 
@@ -197,11 +195,6 @@ struct SettingsView: View {
           .help("Open System Settings → Privacy & Security → Automation to review or revoke per-app access")
 
           Spacer()
-
-          Button(role: .destructive, action: removeSelectedAutomationApps) {
-            Label("Remove", systemImage: "trash")
-          }
-          .disabled(selectedAutomationApps.isEmpty)
         }
 
         automationAppsTable
@@ -249,8 +242,6 @@ struct SettingsView: View {
                 app: app,
                 status: store.automationStatuses[app.bundleID] ?? .unknown,
                 isBusy: store.isRequestingAutomationAccess,
-                isSelected: selectedAutomationApps.contains(app.bundleID),
-                onSelect: { toggleAutomationSelection(for: app) },
                 onRequest: { store.requestAutomationAccess(bundleID: app.bundleID) }
               )
               Divider()
@@ -279,13 +270,7 @@ struct SettingsView: View {
 
     if panel.runModal() == .OK {
       store.addAutomationApps(urls: panel.urls)
-      selectedAutomationApps.removeAll()
     }
-  }
-
-  private func removeSelectedAutomationApps() {
-    store.removeAutomationApps(bundleIDs: selectedAutomationApps)
-    selectedAutomationApps.removeAll()
   }
 
   private func openAutomationSystemSettings() {
@@ -293,14 +278,6 @@ struct SettingsView: View {
       return
     }
     NSWorkspace.shared.open(url)
-  }
-
-  private func toggleAutomationSelection(for app: AutomationAppInfo) {
-    if selectedAutomationApps.contains(app.bundleID) {
-      selectedAutomationApps.remove(app.bundleID)
-    } else {
-      selectedAutomationApps.insert(app.bundleID)
-    }
   }
 }
 
@@ -329,8 +306,6 @@ private struct AutomationAppRow: View {
   let app: AutomationAppInfo
   let status: AutomationPermissionStatus
   let isBusy: Bool
-  let isSelected: Bool
-  let onSelect: () -> Void
   let onRequest: () -> Void
 
   var body: some View {
@@ -361,9 +336,6 @@ private struct AutomationAppRow: View {
     }
     .padding(.horizontal, 10)
     .padding(.vertical, 8)
-    .contentShape(Rectangle())
-    .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-    .onTapGesture(perform: onSelect)
   }
 }
 
