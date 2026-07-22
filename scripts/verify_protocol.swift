@@ -42,7 +42,8 @@ func runProtocolVerifier() throws {
     "screenshot.region",
     "screenshot.cursor",
     "screenshot.webp",
-    "screenshot.binary"
+    "screenshot.binary",
+    "osascript.run"
   ], "capabilities")
 
   let capture = try sendFrame(
@@ -87,6 +88,8 @@ func runProtocolVerifier() throws {
   expectEqual(wrongProtocol.error?.code, "protocol_mismatch", "protocol mismatch code")
 
   try runAccessibilityVerifier(configuration: configuration)
+
+  try runOsascriptVerifier(configuration: configuration)
 
   try runConfigurationVerifier()
   try runFileEditingVerifier(permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .unknown)))
@@ -216,6 +219,45 @@ func runAccessibilityVerifier(configuration: AgentConfiguration) throws {
   )
   expect(deniedStatus.ok, "denied status should be ok")
   expect(deniedStatus.data?.capabilities.contains("ax.find") == false, "ax capabilities must be hidden when accessibility is denied")
+}
+
+func runOsascriptVerifier(configuration: AgentConfiguration) throws {
+  let screenshot = CapturedImage(data: Data([0x52, 0x49]), mimeType: "image/webp", width: 1, height: 1)
+  let fakeOsascript = FakeOsascriptService(
+    result: OsascriptRunPayload(language: "applescript", exitCode: 0, stdout: "paused\n", stderr: "", timedOut: false)
+  )
+  let handler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    osascript: fakeOsascript
+  )
+
+  // osascript.run must work without accessibility or screen recording permission.
+  let run: Envelope<OsascriptRunPayload> = try send(
+    AgentRequest(
+      id: "req_osascript_run",
+      action: "osascript.run",
+      params: AgentRequestParams(script: "tell application \"Music\" to pause", language: "applescript", timeout: 10)
+    ),
+    to: handler
+  )
+  expect(run.ok, "osascript.run should be ok")
+  expectEqual(run.data?.exitCode, 0, "osascript.run exit code")
+  expectEqual(run.data?.stdout, "paused\n", "osascript.run stdout")
+  expectEqual(run.data?.language, "applescript", "osascript.run language")
+  expectEqual(run.data?.timedOut, false, "osascript.run timedOut")
+  expectEqual(fakeOsascript.lastScript, "tell application \"Music\" to pause", "osascript.run passes script through")
+  expectEqual(fakeOsascript.lastLanguage, "applescript", "osascript.run passes language through")
+  expectEqual(fakeOsascript.lastTimeout, 10, "osascript.run passes timeout through")
+
+  // Missing script must fail with invalid_request.
+  let missingScript: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_osascript_missing", action: "osascript.run", params: AgentRequestParams()),
+    to: handler
+  )
+  expect(!missingScript.ok, "osascript.run without script should fail")
+  expectEqual(missingScript.error?.code, "invalid_request", "osascript.run missing script error code")
 }
 
 func runConfigurationVerifier() throws {  let fileManager = FileManager.default
@@ -798,6 +840,42 @@ struct FakeAccessibilityService: AccessibilityServicing {
 
   func clickAt(x: Double, y: Double, button: String, clickCount: Int) throws {}
   func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?) throws {}
+}
+
+final class FakeOsascriptService: OsascriptServicing, @unchecked Sendable {
+  let result: OsascriptRunPayload
+  private let lock = NSLock()
+  private var _lastScript: String?
+  private var _lastLanguage: String?
+  private var _lastTimeout: TimeInterval?
+
+  var lastScript: String? {
+    lock.lock(); defer { lock.unlock() }
+    return _lastScript
+  }
+
+  var lastLanguage: String? {
+    lock.lock(); defer { lock.unlock() }
+    return _lastLanguage
+  }
+
+  var lastTimeout: TimeInterval? {
+    lock.lock(); defer { lock.unlock() }
+    return _lastTimeout
+  }
+
+  init(result: OsascriptRunPayload) {
+    self.result = result
+  }
+
+  func run(script: String, language: String, timeout: TimeInterval) throws -> OsascriptRunPayload {
+    lock.lock()
+    _lastScript = script
+    _lastLanguage = language
+    _lastTimeout = timeout
+    lock.unlock()
+    return result
+  }
 }
 
 struct Envelope<T: Decodable>: Decodable {

@@ -84,6 +84,11 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
   public var deltaX: Int?
   public var deltaY: Int?
 
+  // Osascript params
+  public var script: String?
+  public var language: String?
+  public var timeout: Double?
+
   public init(
     mode: String? = nil,
     format: String? = nil,
@@ -135,7 +140,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     modifiers: [String]? = nil,
     text: String? = nil,
     deltaX: Int? = nil,
-    deltaY: Int? = nil
+    deltaY: Int? = nil,
+    script: String? = nil,
+    language: String? = nil,
+    timeout: Double? = nil
   ) {
     self.mode = mode
     self.format = format
@@ -188,6 +196,9 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     self.text = text
     self.deltaX = deltaX
     self.deltaY = deltaY
+    self.script = script
+    self.language = language
+    self.timeout = timeout
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -242,6 +253,9 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     case text
     case deltaX
     case deltaY
+    case script
+    case language
+    case timeout
   }
 
   public init(from decoder: Decoder) throws {
@@ -296,6 +310,9 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     text = try container.decodeIfPresent(String.self, forKey: .text)
     deltaX = try container.decodeIfPresent(Int.self, forKey: .deltaX)
     deltaY = try container.decodeIfPresent(Int.self, forKey: .deltaY)
+    script = try container.decodeIfPresent(String.self, forKey: .script)
+    language = try container.decodeIfPresent(String.self, forKey: .language)
+    timeout = try container.decodeIfPresent(Double.self, forKey: .timeout)
 
     if let numericWindowID = try? container.decodeIfPresent(UInt32.self, forKey: .windowId) {
       windowId = numericWindowID
