@@ -9,7 +9,8 @@ struct SettingsView: View {
   @State private var selectedAutomationApps = Set<String>()
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 20) {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
       // MARK: - Prevent Idle Sleep
       GroupBox {
         VStack(alignment: .leading, spacing: 14) {
@@ -135,8 +136,9 @@ struct SettingsView: View {
 
       // MARK: - AppleScript App Access
       automationAccessGroupBox
+      }
+      .frame(maxWidth: .infinity, alignment: .topLeading)
     }
-    .frame(maxWidth: .infinity, alignment: .topLeading)
   }
 
   private var fileEditingStatus: String {
@@ -186,6 +188,13 @@ struct SettingsView: View {
           Button("Request All Access", action: store.requestAllAutomationAccess)
             .buttonStyle(.borderedProminent)
             .disabled(store.automationApps.isEmpty || store.isRequestingAutomationAccess)
+
+          Button {
+            openAutomationSystemSettings()
+          } label: {
+            Label("System Settings", systemImage: "gear")
+          }
+          .help("Open System Settings → Privacy & Security → Automation to review or revoke per-app access")
 
           Spacer()
 
@@ -277,6 +286,13 @@ struct SettingsView: View {
   private func removeSelectedAutomationApps() {
     store.removeAutomationApps(bundleIDs: selectedAutomationApps)
     selectedAutomationApps.removeAll()
+  }
+
+  private func openAutomationSystemSettings() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") else {
+      return
+    }
+    NSWorkspace.shared.open(url)
   }
 
   private func toggleAutomationSelection(for app: AutomationAppInfo) {
