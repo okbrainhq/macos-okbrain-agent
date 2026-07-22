@@ -110,6 +110,23 @@ final class AgentRuntimeStore: ObservableObject {
     isAgentRuntimeActive = true
     startSocketIfNeeded()
     applyIdleSleepPreventionSetting()
+    observeAppActivationForPermissionRefresh()
+  }
+
+  private func observeAppActivationForPermissionRefresh() {
+    NotificationCenter.default.addObserver(
+      forName: NSApplication.didBecomeActiveNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      // User may have toggled Automation permissions in System Settings while
+      // we were in the background — re-read statuses when they come back.
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        self.refreshAutomationStatuses()
+        self.permissions = self.permissionService.currentPermissions()
+      }
+    }
   }
 
   func restartSocket() {
