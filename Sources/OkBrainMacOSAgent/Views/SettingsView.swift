@@ -1,7 +1,6 @@
 import AppKit
 import OkBrainMacOSAgentCore
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct SettingsView: View {
   @EnvironmentObject private var store: AgentRuntimeStore
@@ -143,126 +142,67 @@ struct SettingsView: View {
     store.configuration.fileEditing.enabled ? "Enabled" : "Disabled"
   }
 
-  // MARK: - AppleScript App Access
+  // MARK: - AppleScript API
 
   private var automationAccessGroupBox: some View {
     GroupBox {
       VStack(alignment: .leading, spacing: 14) {
         HStack(alignment: .center) {
-          Text("AppleScript App Access")
+          Text("AppleScript API")
             .font(.headline)
 
           Spacer(minLength: 12)
 
           StatusPill(
-            title: "\(authorizedAutomationCount) authorized",
+            title: store.appleScriptAPIEnabled ? "Enabled" : "Disabled",
             systemImage: "apple.terminal",
-            tint: authorizedAutomationCount > 0 ? .green : .secondary
+            tint: store.appleScriptAPIEnabled ? .green : .secondary
           )
         }
 
         Divider()
 
+        Toggle(isOn: $store.appleScriptAPIEnabled) {
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Enable AppleScript API")
+              .font(.callout.weight(.medium))
+            Text("Allows remote clients to run AppleScript / JXA via the osascript.run endpoint.")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+        }
+        .toggleStyle(.switch)
+
         VStack(alignment: .leading, spacing: 10) {
           InfoRow(
             icon: "apple.terminal",
-            text: "Lets the agent run AppleScript / osascript against apps you choose — e.g. pause Music, set volume, control Finder."
+            text: "Lets the agent run AppleScript / osascript — e.g. pause Music, set volume, control Finder."
           )
 
           InfoRow(
             icon: "hand.raised",
-            text: "macOS asks for your approval once per app, the first time the agent tries to control it. Add apps below to track their permission status."
+            text: "macOS asks for your approval once per target app, the first time the agent tries to control it."
           )
 
           InfoRow(
             icon: "exclamationmark.triangle",
-            text: "To approve, re-approve, or revoke an app's access, use System Settings → Privacy & Security → Automation (button below). Statuses here refresh automatically when you return to this window."
+            text: "To review or revoke per-app access, use System Settings → Privacy & Security → Automation."
           )
         }
 
         HStack(spacing: 10) {
-          Button("Add Apps…", action: chooseAutomationApps)
-
           Button {
             openAutomationSystemSettings()
           } label: {
-            Label("System Settings", systemImage: "gear")
+            Label("Open Automation Settings", systemImage: "gear")
           }
           .buttonStyle(.borderedProminent)
           .help("Open System Settings → Privacy & Security → Automation to review or revoke per-app access")
 
           Spacer()
         }
-
-        automationAppsTable
       }
       .padding(4)
-    }
-  }
-
-  private var authorizedAutomationCount: Int {
-    store.automationApps.filter { store.automationStatuses[$0.bundleID] == .authorized }.count
-  }
-
-  @ViewBuilder
-  private var automationAppsTable: some View {
-    if store.automationApps.isEmpty {
-      VStack(alignment: .leading, spacing: 6) {
-        Text("No apps added")
-          .font(.headline)
-        Text("Click \"Add Apps…\" to pick apps from your Applications folder.")
-          .foregroundStyle(.secondary)
-      }
-      .frame(maxWidth: .infinity, minHeight: 80, alignment: .center)
-    } else {
-      VStack(spacing: 0) {
-        HStack(spacing: 12) {
-          Text("App")
-            .frame(maxWidth: .infinity, alignment: .leading)
-          Text("Status")
-            .frame(width: 150, alignment: .leading)
-        }
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.secondary.opacity(0.08))
-
-        Divider()
-
-        ScrollView {
-          LazyVStack(spacing: 0) {
-            ForEach(store.automationApps) { app in
-              AutomationAppRow(
-                app: app,
-                status: store.automationStatuses[app.bundleID] ?? .unknown
-              )
-              Divider()
-            }
-          }
-        }
-        .frame(minHeight: 120, maxHeight: 240)
-      }
-      .clipShape(RoundedRectangle(cornerRadius: 8))
-      .overlay {
-        RoundedRectangle(cornerRadius: 8)
-          .stroke(Color.secondary.opacity(0.18))
-      }
-    }
-  }
-
-  private func chooseAutomationApps() {
-    let panel = NSOpenPanel()
-    panel.canChooseFiles = true
-    panel.canChooseDirectories = false
-    panel.allowsMultipleSelection = true
-    panel.allowedContentTypes = [UTType.application]
-    panel.prompt = "Add"
-    panel.message = "Select applications to pre-authorize for AppleScript control"
-    panel.directoryURL = URL(fileURLWithPath: "/Applications")
-
-    if panel.runModal() == .OK {
-      store.addAutomationApps(urls: panel.urls)
     }
   }
 
@@ -289,77 +229,6 @@ private struct InfoRow: View {
       Text(text)
         .font(.callout)
         .foregroundStyle(.secondary)
-    }
-  }
-}
-
-// MARK: - Automation App Row
-
-private struct AutomationAppRow: View {
-  let app: AutomationAppInfo
-  let status: AutomationPermissionStatus
-
-  var body: some View {
-    HStack(spacing: 12) {
-      VStack(alignment: .leading, spacing: 2) {
-        Text(app.name)
-          .font(.callout)
-          .lineLimit(1)
-        Text(app.bundleID)
-          .font(.caption.monospaced())
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
-          .truncationMode(.middle)
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-
-      StatusPill(
-        title: status.label,
-        systemImage: status.systemImage,
-        tint: status.tint
-      )
-      .frame(width: 150, alignment: .leading)
-    }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 8)
-  }
-}
-
-private extension AutomationPermissionStatus {
-  var label: String {
-    switch self {
-    case .authorized:
-      "Authorized"
-    case .denied:
-      "Denied"
-    case .notDetermined:
-      "Not Requested"
-    case .unknown:
-      "Unknown"
-    }
-  }
-
-  var systemImage: String {
-    switch self {
-    case .authorized:
-      "checkmark.circle.fill"
-    case .denied:
-      "xmark.octagon.fill"
-    case .notDetermined:
-      "questionmark.circle"
-    case .unknown:
-      "questionmark.circle"
-    }
-  }
-
-  var tint: Color {
-    switch self {
-    case .authorized:
-      .green
-    case .denied:
-      .red
-    case .notDetermined, .unknown:
-      .secondary
     }
   }
 }
