@@ -30,7 +30,7 @@ final class AgentRuntimeStore: ObservableObject {
   private static let preventIdleSleepDefaultsKey = "preventIdleSleepEnabled"
   private static let fileEditingEnabledDefaultsKey = "fileEditingEnabled"
   private static let filePermissionRulesDefaultsKey = "filePermissionRules"
-  private static let appleScriptAPIEnabledDefaultsKey = "appleScriptAPIEnabled"
+  private static let remoteControlAPIsEnabledDefaultsKey = "remoteControlAPIsEnabled"
   private static let preventIdleSleepReason = "OkBrain Agent is running and ready for remote screenshots."
 
   @Published private(set) var configuration: AgentConfiguration
@@ -40,13 +40,13 @@ final class AgentRuntimeStore: ObservableObject {
   @Published private(set) var latestProtocolResponse = ""
   @Published private(set) var isCapturing = false
   @Published private(set) var filePermissionRules: [FileEditingAllowedRoot]
-  @Published var appleScriptAPIEnabled: Bool {
+  @Published var remoteControlAPIsEnabled: Bool {
     didSet {
-      guard appleScriptAPIEnabled != oldValue else {
+      guard remoteControlAPIsEnabled != oldValue else {
         return
       }
 
-      UserDefaults.standard.set(appleScriptAPIEnabled, forKey: Self.appleScriptAPIEnabledDefaultsKey)
+      UserDefaults.standard.set(remoteControlAPIsEnabled, forKey: Self.remoteControlAPIsEnabledDefaultsKey)
     }
   }
   @Published var preventIdleSleepEnabled: Bool {
@@ -82,12 +82,12 @@ final class AgentRuntimeStore: ObservableObject {
     UserDefaults.standard.register(defaults: [
       Self.preventIdleSleepDefaultsKey: true,
       Self.fileEditingEnabledDefaultsKey: false,
-      Self.appleScriptAPIEnabledDefaultsKey: true
+      Self.remoteControlAPIsEnabledDefaultsKey: true
     ])
 
     let preventIdleSleepEnabled = UserDefaults.standard.bool(forKey: Self.preventIdleSleepDefaultsKey)
     let fileEditingEnabled = UserDefaults.standard.bool(forKey: Self.fileEditingEnabledDefaultsKey)
-    let appleScriptAPIEnabled = UserDefaults.standard.bool(forKey: Self.appleScriptAPIEnabledDefaultsKey)
+    let remoteControlAPIsEnabled = UserDefaults.standard.bool(forKey: Self.remoteControlAPIsEnabledDefaultsKey)
     let filePermissionRules = Self.loadFilePermissionRules()
     let configuration = AgentConfiguration.current(
       fileEditingEnabled: fileEditingEnabled,
@@ -96,7 +96,7 @@ final class AgentRuntimeStore: ObservableObject {
     self.configuration = configuration
     self.preventIdleSleepEnabled = preventIdleSleepEnabled
     self.fileEditingEnabled = fileEditingEnabled
-    self.appleScriptAPIEnabled = appleScriptAPIEnabled
+    self.remoteControlAPIsEnabled = remoteControlAPIsEnabled
     self.filePermissionRules = filePermissionRules
     idleSleepPrevention = IdleSleepPreventionSnapshot(
       state: preventIdleSleepEnabled ? .inactive : .disabled,
@@ -109,7 +109,7 @@ final class AgentRuntimeStore: ObservableObject {
       configuration: configuration,
       permissions: permissionService,
       screenshots: screenshotService,
-      osascriptEnabled: { UserDefaults.standard.bool(forKey: Self.appleScriptAPIEnabledDefaultsKey) }
+      remoteControlEnabled: { UserDefaults.standard.bool(forKey: Self.remoteControlAPIsEnabledDefaultsKey) }
     )
   }
 
@@ -211,7 +211,7 @@ final class AgentRuntimeStore: ObservableObject {
       configuration: nextConfiguration,
       permissions: permissionService,
       screenshots: screenshotService,
-      osascriptEnabled: { UserDefaults.standard.bool(forKey: Self.appleScriptAPIEnabledDefaultsKey) }
+      remoteControlEnabled: { UserDefaults.standard.bool(forKey: Self.remoteControlAPIsEnabledDefaultsKey) }
     )
 
     if isAgentRuntimeActive {

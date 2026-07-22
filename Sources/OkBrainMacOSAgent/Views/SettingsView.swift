@@ -148,25 +148,25 @@ struct SettingsView: View {
     GroupBox {
       VStack(alignment: .leading, spacing: 14) {
         HStack(alignment: .center) {
-          Text("AppleScript API")
+          Text("Remote Control APIs")
             .font(.headline)
 
           Spacer(minLength: 12)
 
           StatusPill(
-            title: store.appleScriptAPIEnabled ? "Enabled" : "Disabled",
+            title: store.remoteControlAPIsEnabled ? "Enabled" : "Disabled",
             systemImage: "apple.terminal",
-            tint: store.appleScriptAPIEnabled ? .green : .secondary
+            tint: store.remoteControlAPIsEnabled ? .green : .secondary
           )
         }
 
         Divider()
 
-        Toggle(isOn: $store.appleScriptAPIEnabled) {
+        Toggle(isOn: $store.remoteControlAPIsEnabled) {
           VStack(alignment: .leading, spacing: 2) {
-            Text("Enable AppleScript API")
+            Text("Enable Remote Control APIs")
               .font(.callout.weight(.medium))
-            Text("Allows remote clients to run AppleScript / JXA via the osascript.run endpoint.")
+            Text("Allows remote clients to drive this Mac via the Accessibility (ax.*) and AppleScript (osascript.run) endpoints.")
               .font(.caption)
               .foregroundStyle(.secondary)
           }
@@ -176,7 +176,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
           InfoRow(
             icon: "apple.terminal",
-            text: "Lets the agent run AppleScript / osascript — e.g. pause Music, set volume, control Finder."
+            text: "Lets the agent control this Mac — AppleScript / osascript (pause Music, set volume, control Finder) and Accessibility UI queries & events (click, type, scroll)."
           )
 
           InfoRow(

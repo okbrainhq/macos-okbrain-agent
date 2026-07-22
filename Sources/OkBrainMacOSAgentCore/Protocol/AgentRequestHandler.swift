@@ -11,7 +11,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
   private let fileEditing: FileEditingServicing
   private let accessibility: AccessibilityServicing
   private let osascript: OsascriptServicing
-  private let osascriptEnabled: @Sendable () -> Bool
+  private let remoteControlEnabled: @Sendable () -> Bool
 
   private let envelopeActions: Set<String> = [
     "agent.status",
@@ -55,7 +55,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
     fileEditing: FileEditingServicing? = nil,
     accessibility: AccessibilityServicing = SystemAccessibilityService(),
     osascript: OsascriptServicing = SystemOsascriptService(),
-    osascriptEnabled: (@Sendable () -> Bool)? = nil
+    remoteControlEnabled: (@Sendable () -> Bool)? = nil
   ) {
     self.configuration = configuration
     self.permissions = permissions
@@ -63,7 +63,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
     self.fileEditing = fileEditing ?? LocalFileEditingService(configuration: configuration.fileEditing)
     self.accessibility = accessibility
     self.osascript = osascript
-    self.osascriptEnabled = osascriptEnabled ?? { true }
+    self.remoteControlEnabled = remoteControlEnabled ?? { true }
   }
 
   public func handle(requestData: Data) -> Data {
@@ -93,6 +93,12 @@ public final class AgentRequestHandler: @unchecked Sendable {
         throw AgentProtocolError.protocolMismatch("Expected protocol \(AgentConfiguration.protocolName)")
       }
       responseProtocol = protocolName
+
+      // Single kill-switch for every remote-control surface: Accessibility
+      // (ax.*) and AppleScript (osascript.run).
+      if (accessibilityActions.contains(action) || osascriptActions.contains(action)), !remoteControlEnabled() {
+        throw AgentProtocolError.invalidRequest("Remote control APIs (Accessibility ax.* and AppleScript osascript.run) are disabled in the agent's settings")
+      }
 
       // Wake the display for accessibility commands so AX queries and
       // synthetic input events work even when the display has gone to sleep.
@@ -260,9 +266,6 @@ public final class AgentRequestHandler: @unchecked Sendable {
           )
         )
       case "osascript.run":
-        guard osascriptEnabled() else {
-          throw AgentProtocolError.invalidRequest("AppleScript (osascript) API is disabled in the agent's settings")
-        }
         guard let script = request.params?.script, !script.isEmpty else {
           throw AgentProtocolError.invalidRequest("script is required for osascript.run")
         }
