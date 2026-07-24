@@ -11,10 +11,11 @@ public protocol AccessibilityServicing: Sendable {
   func perform(query: AXElementQuery, action: String) throws -> AXPerformPayload
   func value(query: AXElementQuery) throws -> AXValuePayload
   func setValue(query: AXElementQuery, value: String) throws -> AXValuePayload
-  func typeText(_ text: String) throws
-  func keyPress(key: String, modifiers: [String]) throws
-  func clickAt(x: Double, y: Double, button: String, clickCount: Int) throws
-  func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?) throws
+  func typeText(_ text: String, targetPid: Int32?) throws
+  func keyPress(key: String, modifiers: [String], targetPid: Int32?) throws
+  func clickAt(x: Double, y: Double, button: String, clickCount: Int, targetPid: Int32?) throws
+  func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?, targetPid: Int32?) throws
+  func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws
 }
 
 public final class SystemAccessibilityService: AccessibilityServicing, @unchecked Sendable {
@@ -50,6 +51,21 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
     "u": 32, "[": 33, "i": 34, "p": 35, "l": 37, "j": 38, "'": 39,
     "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46,
     ".": 47, "`": 50, "-": 27, "=": 24
+  ]
+
+  /// CGEvent field 89 = kCGEventTargetUnixProcessID — routes the event to a
+  /// specific process without moving the real cursor or stealing focus.
+  private static let cgEventTargetUnixProcessID = CGEventField(rawValue: 89)!
+
+  /// Roles considered interactive or scrollable for compact tree mode.
+  private static let interactiveRoles: Set<String> = [
+    "AXButton", "AXCheckBox", "AXComboBox", "AXDisclosureTriangle",
+    "AXImage", "AXLink", "AXList", "AXMenu", "AXMenuBar", "AXMenuBarItem",
+    "AXMenuItem", "AXOutline", "AXPopUpButton", "AXRadioButton",
+    "AXRow", "AXScrollBar", "AXSearchField", "AXSlider", "AXSplitGroup",
+    "AXStaticText", "AXTab", "AXTabGroup", "AXTable", "AXTextArea",
+    "AXTextField", "AXToolbar", "AXTree", "AXWindow", "AXGroup",
+    "AXScrollArea", "AXColumn", "AXCell", "AXHeading"
   ]
 
   public init() {
@@ -121,7 +137,8 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
       rootElement,
       depthRemaining: max(0, query.maxDepth),
       budget: &budget,
-      includeChildren: true
+      includeChildren: true,
+      compact: query.compact
     ) else {
       throw AgentProtocolError.internalError("Unable to read the accessibility tree")
     }
@@ -236,7 +253,7 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
 
   // MARK: - Input synthesis
 
-  public func typeText(_ text: String) throws {
+  public func typeText(_ text: String, targetPid: Int32? = nil) throws {
     guard !text.isEmpty else {
       throw AgentProtocolError.invalidRequest("text is required")
     }
@@ -249,15 +266,15 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
       var utf16 = Array(String(character).utf16)
       let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
       keyDown?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-      keyDown?.post(tap: .cghidEventTap)
+      postEvent(keyDown, targetPid: targetPid)
       let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
       keyUp?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-      keyUp?.post(tap: .cghidEventTap)
+      postEvent(keyUp, targetPid: targetPid)
       usleep(2_000)
     }
   }
 
-  public func keyPress(key: String, modifiers: [String]) throws {
+  public func keyPress(key: String, modifiers: [String], targetPid: Int32? = nil) throws {
     let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     guard let keyCode = Self.keyCodes[normalizedKey] else {
       throw AgentProtocolError.unsupportedParameter(
@@ -286,13 +303,13 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
     let source = CGEventSource(stateID: .hidSystemState)
     let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
     keyDown?.flags = flags
-    keyDown?.post(tap: .cghidEventTap)
+    postEvent(keyDown, targetPid: targetPid)
     let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
     keyUp?.flags = flags
-    keyUp?.post(tap: .cghidEventTap)
+    postEvent(keyUp, targetPid: targetPid)
   }
 
-  public func clickAt(x: Double, y: Double, button: String, clickCount: Int) throws {
+  public func clickAt(x: Double, y: Double, button: String, clickCount: Int, targetPid: Int32? = nil) throws {
     let point = CGPoint(x: x, y: y)
     let downType: CGEventType
     let upType: CGEventType
@@ -320,11 +337,11 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
     for click in 1...clicks {
       let mouseDown = CGEvent(mouseEventSource: source, mouseType: downType, mouseCursorPosition: point, mouseButton: mouseButton)
       mouseDown?.setIntegerValueField(.mouseEventClickState, value: Int64(click))
-      mouseDown?.post(tap: .cghidEventTap)
+      postEvent(mouseDown, targetPid: targetPid)
       usleep(10_000)
       let mouseUp = CGEvent(mouseEventSource: source, mouseType: upType, mouseCursorPosition: point, mouseButton: mouseButton)
       mouseUp?.setIntegerValueField(.mouseEventClickState, value: Int64(click))
-      mouseUp?.post(tap: .cghidEventTap)
+      postEvent(mouseUp, targetPid: targetPid)
       usleep(30_000)
     }
   }
@@ -333,7 +350,7 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
   /// explicit `x`/`y` → center of the element matched by `query` → center of the target window.
   /// `deltaY` > 0 scrolls content down (reveals content below), `deltaX` > 0 scrolls right.
   /// One unit ≈ 40 px.
-  public func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?) throws {
+  public func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?, targetPid: Int32? = nil) throws {
     guard deltaX != 0 || deltaY != 0 else {
       throw AgentProtocolError.invalidRequest("deltaX or deltaY must be non-zero")
     }
@@ -371,6 +388,52 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
       throw AgentProtocolError.actionFailed("Unable to create scroll event")
     }
     event.location = point
+    postEvent(event, targetPid: targetPid)
+  }
+
+  /// Drags from one point to another with smooth interpolation.
+  public func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32? = nil) throws {
+    let source = CGEventSource(stateID: .hidSystemState)
+    let from = CGPoint(x: fromX, y: fromY)
+    let to = CGPoint(x: toX, y: toY)
+
+    // Move to start
+    let moveEvent = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: from, mouseButton: .left)
+    postEvent(moveEvent, targetPid: targetPid)
+    usleep(50_000)
+
+    // Mouse down
+    let downEvent = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: from, mouseButton: .left)
+    postEvent(downEvent, targetPid: targetPid)
+    usleep(100_000)
+
+    // Interpolated drag with smoothstep
+    let steps = 20
+    for i in 1...steps {
+      let t = Double(i) / Double(steps)
+      let tSmooth = t * t * (3.0 - 2.0 * t)
+      let x = fromX + (toX - fromX) * tSmooth
+      let y = fromY + (toY - fromY) * tSmooth
+      let dragEvent = CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
+      postEvent(dragEvent, targetPid: targetPid)
+      usleep(8_000)
+    }
+
+    usleep(50_000)
+
+    // Mouse up
+    let upEvent = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: to, mouseButton: .left)
+    postEvent(upEvent, targetPid: targetPid)
+  }
+
+  // MARK: - Event posting
+
+  /// Posts a CGEvent globally or to a specific process via field 89.
+  private func postEvent(_ event: CGEvent?, targetPid: Int32?) {
+    guard let event else { return }
+    if let pid = targetPid {
+      event.setIntegerValueField(Self.cgEventTargetUnixProcessID, value: Int64(pid))
+    }
     event.post(tap: .cghidEventTap)
   }
 
@@ -587,52 +650,189 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
 
   private func snapshot(_ element: AXUIElement) -> AXElementNode {
     var budget = 1
-    return buildNode(element, depthRemaining: 0, budget: &budget, includeChildren: false)
+    return buildNode(element, depthRemaining: 0, budget: &budget, includeChildren: false, compact: false)
       ?? AXElementNode(
         role: nil, subrole: nil, title: nil, label: nil, identifier: nil,
         value: nil, valueTruncated: nil, frame: nil, enabled: nil, focused: nil, children: nil
       )
   }
 
+  /// Attributes fetched in a single batch call per element.
+  private static let batchAttributes: [String] = [
+    kAXRoleAttribute,        // 0
+    kAXSubroleAttribute,     // 1
+    kAXTitleAttribute,       // 2
+    kAXDescriptionAttribute, // 3
+    kAXIdentifierAttribute,  // 4
+    kAXValueAttribute,       // 5
+    kAXPositionAttribute,    // 6
+    kAXSizeAttribute,        // 7
+    kAXEnabledAttribute,     // 8
+    kAXFocusedAttribute,     // 9
+    kAXChildrenAttribute     // 10
+  ]
+
   private func buildNode(
     _ element: AXUIElement,
     depthRemaining: Int,
     budget: inout Int,
-    includeChildren: Bool
+    includeChildren: Bool,
+    compact: Bool
   ) -> AXElementNode? {
     guard budget > 0 else { return nil }
     budget -= 1
 
-    let (value, valueTruncated) = valueAttribute(element)
+    // Batch-read all attributes in one IPC round-trip.
+    let attrs = batchAttributes(of: element)
+
+    let role = stringValue(from: attrs?[0])
+    let subrole = stringValue(from: attrs?[1])
+    let title = stringValue(from: attrs?[2])
+    let label = stringValue(from: attrs?[3])
+    let identifier = stringValue(from: attrs?[4])
+    let (value, valueTruncated) = valueFromCFType(attrs?[5])
+    let frame = frameFromCFTypes(position: attrs?[6], size: attrs?[7])
+    let enabled = boolValue(from: attrs?[8])
+    let focused = boolValue(from: attrs?[9])
 
     var childNodes: [AXElementNode]?
     if includeChildren, depthRemaining > 0 {
-      let childElements = children(of: element)
+      let childElements: [AXUIElement]
+      if let childrenRef = attrs?[10], let children = childrenRef as? [AXUIElement] {
+        childElements = children
+      } else if let visibleChildren = copyAttribute(element, kAXVisibleChildrenAttribute) as? [AXUIElement] {
+        childElements = visibleChildren
+      } else {
+        childElements = []
+      }
+
       if !childElements.isEmpty {
         var nodes: [AXElementNode] = []
         for child in childElements {
           guard budget > 0 else { break }
-          if let node = buildNode(child, depthRemaining: depthRemaining - 1, budget: &budget, includeChildren: true) {
+          // In compact mode, skip non-interactive leaf nodes.
+          if compact {
+            let childRole = stringAttribute(child, kAXRoleAttribute)
+            if let childRole, !Self.interactiveRoles.contains(childRole) {
+              // Still recurse into containers that might have interactive descendants.
+              let childChildren = children(of: child)
+              if childChildren.isEmpty { continue }
+            }
+          }
+          if let node = buildNode(child, depthRemaining: depthRemaining - 1, budget: &budget, includeChildren: true, compact: compact) {
             nodes.append(node)
           }
         }
-        childNodes = nodes
+        childNodes = nodes.isEmpty ? nil : nodes
       }
     }
 
     return AXElementNode(
-      role: stringAttribute(element, kAXRoleAttribute),
-      subrole: stringAttribute(element, kAXSubroleAttribute),
-      title: stringAttribute(element, kAXTitleAttribute),
-      label: stringAttribute(element, kAXDescriptionAttribute),
-      identifier: stringAttribute(element, kAXIdentifierAttribute),
+      role: role,
+      subrole: subrole,
+      title: title,
+      label: label,
+      identifier: identifier,
       value: value,
       valueTruncated: valueTruncated,
-      frame: frame(of: element),
-      enabled: boolAttribute(element, kAXEnabledAttribute),
-      focused: boolAttribute(element, kAXFocusedAttribute),
+      frame: frame,
+      enabled: enabled,
+      focused: focused,
       children: childNodes
     )
+  }
+
+  // MARK: - Batch AX attribute reading
+
+  /// Reads all batch attributes in a single AXUIElementCopyMultipleAttributeValues call.
+  /// Returns nil if the batch call fails (falls back to individual reads via buildNode helpers).
+  private func batchAttributes(of element: AXUIElement) -> [CFTypeRef?]? {
+    let cfAttrNames: [CFString] = Self.batchAttributes.map { $0 as CFString }
+    let attrArray = cfAttrNames as CFArray
+
+    var outValues: CFArray?
+    let result = AXUIElementCopyMultipleAttributeValues(element, attrArray, [], &outValues)
+
+    guard result == .success, let values = outValues else { return nil }
+
+    let count = CFArrayGetCount(values)
+    guard count == Self.batchAttributes.count else { return nil }
+
+    var out: [CFTypeRef?] = []
+    out.reserveCapacity(count)
+    for i in 0..<count {
+      guard let raw = CFArrayGetValueAtIndex(values, i) else {
+        out.append(nil)
+        continue
+      }
+      let obj = Unmanaged<AnyObject>.fromOpaque(raw).takeUnretainedValue()
+      // Failed attributes come back as AXError values (CFNumber with codes ≤ -25200).
+      if let num = obj as? NSNumber, num.intValue <= -25200, CFGetTypeID(obj) == CFNumberGetTypeID() {
+        out.append(nil)
+      } else {
+        out.append(obj as CFTypeRef)
+      }
+    }
+    return out
+  }
+
+  private func stringValue(from cfType: CFTypeRef?) -> String? {
+    guard let cfType else { return nil }
+    if let str = cfType as? String, !str.isEmpty { return str }
+    if let attributed = cfType as? NSAttributedString, !attributed.string.isEmpty { return attributed.string }
+    if let num = cfType as? NSNumber { return num.stringValue }
+    return nil
+  }
+
+  private func boolValue(from cfType: CFTypeRef?) -> Bool? {
+    guard let cfType else { return nil }
+    if CFGetTypeID(cfType) == CFBooleanGetTypeID() {
+      return CFBooleanGetValue((cfType as! CFBoolean))
+    }
+    if let num = cfType as? NSNumber { return num.boolValue }
+    return nil
+  }
+
+  private func valueFromCFType(_ cfType: CFTypeRef?) -> (AXAttributeValue?, Bool?) {
+    guard let value = cfType else { return (nil, nil) }
+
+    if CFGetTypeID(value) == CFBooleanGetTypeID() {
+      return (.bool(CFBooleanGetValue((value as! CFBoolean))), nil)
+    }
+    if let stringValue = value as? String {
+      if stringValue.count > Self.maxValueLength {
+        return (.string(String(stringValue.prefix(Self.maxValueLength))), true)
+      }
+      return (.string(stringValue), nil)
+    }
+    if let attributed = value as? NSAttributedString {
+      let stringValue = attributed.string
+      if stringValue.count > Self.maxValueLength {
+        return (.string(String(stringValue.prefix(Self.maxValueLength))), true)
+      }
+      return (.string(stringValue), nil)
+    }
+    if let numberValue = value as? NSNumber {
+      if let intValue = Int(exactly: numberValue) {
+        return (.int(intValue), nil)
+      }
+      return (.double(numberValue.doubleValue), nil)
+    }
+    return (nil, nil)
+  }
+
+  private func frameFromCFTypes(position: CFTypeRef?, size: CFTypeRef?) -> CaptureRect? {
+    guard let positionValue = position,
+          let sizeValue = size,
+          CFGetTypeID(positionValue) == AXValueGetTypeID(),
+          CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+      return nil
+    }
+    var point = CGPoint.zero
+    var cgSize = CGSize.zero
+    AXValueGetValue((positionValue as! AXValue), .cgPoint, &point)
+    AXValueGetValue((sizeValue as! AXValue), .cgSize, &cgSize)
+    return CaptureRect(x: point.x, y: point.y, width: cgSize.width, height: cgSize.height)
   }
 
   // MARK: - AX attribute helpers
