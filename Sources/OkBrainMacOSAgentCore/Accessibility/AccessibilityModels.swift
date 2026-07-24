@@ -57,6 +57,8 @@ public struct AXElementQuery: Equatable, Sendable {
   public var allWindows: Bool
   /// Search scope: "windows" (default), "menubar", or "all".
   public var scope: String?
+  /// When true, only include interactive/scrollable roles in the tree.
+  public var compact: Bool
 
   public init(
     appName: String? = nil,
@@ -72,7 +74,8 @@ public struct AXElementQuery: Equatable, Sendable {
     maxDepth: Int = 10,
     maxElements: Int = 500,
     allWindows: Bool = false,
-    scope: String? = nil
+    scope: String? = nil,
+    compact: Bool = false
   ) {
     self.appName = appName
     self.pid = pid
@@ -88,6 +91,7 @@ public struct AXElementQuery: Equatable, Sendable {
     self.maxElements = maxElements
     self.allWindows = allWindows
     self.scope = scope
+    self.compact = compact
   }
 
   public var hasMatchCriteria: Bool {

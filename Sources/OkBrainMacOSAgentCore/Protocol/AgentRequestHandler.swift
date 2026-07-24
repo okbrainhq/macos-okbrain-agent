@@ -42,7 +42,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
     "ax.type-text",
     "ax.key-press",
     "ax.click-at",
-    "ax.scroll"
+    "ax.scroll",
+    "ax.drag"
   ]
 
   private let osascriptActions: Set<String> = [
@@ -221,7 +222,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
         guard let text = request.params?.text, !text.isEmpty else {
           throw AgentProtocolError.invalidRequest("text is required for ax.type-text")
         }
-        try accessibility.typeText(text)
+        try accessibility.typeText(text, targetPid: request.params?.targetPid)
         return try encodeSuccess(
           protocolName: responseProtocol,
           id: requestID,
@@ -232,7 +233,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
         guard let key = request.params?.key, !key.isEmpty else {
           throw AgentProtocolError.invalidRequest("key is required for ax.key-press")
         }
-        try accessibility.keyPress(key: key, modifiers: request.params?.modifiers ?? [])
+        try accessibility.keyPress(key: key, modifiers: request.params?.modifiers ?? [], targetPid: request.params?.targetPid)
         return try encodeSuccess(
           protocolName: responseProtocol,
           id: requestID,
@@ -246,7 +247,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
         guard let x = request.params?.x, let y = request.params?.y else {
           throw AgentProtocolError.invalidRequest("x and y are required for ax.click-at")
         }
-        try accessibility.clickAt(x: x, y: y, button: request.params?.button ?? "left", clickCount: request.params?.clickCount ?? 1)
+        try accessibility.clickAt(x: x, y: y, button: request.params?.button ?? "left", clickCount: request.params?.clickCount ?? 1, targetPid: request.params?.targetPid)
         return try encodeSuccess(
           protocolName: responseProtocol,
           id: requestID,
@@ -259,7 +260,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
           deltaX: request.params?.deltaX ?? 0,
           deltaY: request.params?.deltaY ?? 0,
           x: request.params?.x,
-          y: request.params?.y
+          y: request.params?.y,
+          targetPid: request.params?.targetPid
         )
         return try encodeSuccess(
           protocolName: responseProtocol,
@@ -268,6 +270,18 @@ public final class AgentRequestHandler: @unchecked Sendable {
             action: "ax.scroll",
             detail: "Scrolled by (\(request.params?.deltaX ?? 0), \(request.params?.deltaY ?? 0))"
           )
+        )
+      case "ax.drag":
+        try requireAccessibility()
+        guard let x = request.params?.x, let y = request.params?.y,
+              let toX = request.params?.toX, let toY = request.params?.toY else {
+          throw AgentProtocolError.invalidRequest("x, y, toX, and toY are required for ax.drag")
+        }
+        try accessibility.drag(fromX: x, fromY: y, toX: toX, toY: toY, targetPid: request.params?.targetPid)
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: AXSimpleResultPayload(action: "ax.drag", detail: "Dragged from (\(x), \(y)) to (\(toX), \(toY))")
         )
       case "osascript.run":
         guard let script = request.params?.script, !script.isEmpty else {
@@ -355,7 +369,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
       maxDepth: params?.depth ?? defaultDepth,
       maxElements: params?.maxElements ?? 500,
       allWindows: params?.allWindows ?? false,
-      scope: params?.scope
+      scope: params?.scope,
+      compact: params?.compact ?? false
     )
   }
 
@@ -395,7 +410,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
         "ax.type-text",
         "ax.key-press",
         "ax.click-at",
-        "ax.scroll"
+        "ax.scroll",
+        "ax.drag"
       ])
     }
 

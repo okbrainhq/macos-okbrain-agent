@@ -83,6 +83,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
   public var text: String?
   public var deltaX: Int?
   public var deltaY: Int?
+  public var targetPid: Int32?
+  public var compact: Bool?
+  public var toX: Double?
+  public var toY: Double?
 
   // Osascript params
   public var script: String?
@@ -141,6 +145,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     text: String? = nil,
     deltaX: Int? = nil,
     deltaY: Int? = nil,
+    targetPid: Int32? = nil,
+    compact: Bool? = nil,
+    toX: Double? = nil,
+    toY: Double? = nil,
     script: String? = nil,
     language: String? = nil,
     timeout: Double? = nil
@@ -196,6 +204,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     self.text = text
     self.deltaX = deltaX
     self.deltaY = deltaY
+    self.targetPid = targetPid
+    self.compact = compact
+    self.toX = toX
+    self.toY = toY
     self.script = script
     self.language = language
     self.timeout = timeout
@@ -253,6 +265,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     case text
     case deltaX
     case deltaY
+    case targetPid
+    case compact
+    case toX
+    case toY
     case script
     case language
     case timeout
@@ -310,6 +326,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     text = try container.decodeIfPresent(String.self, forKey: .text)
     deltaX = try container.decodeIfPresent(Int.self, forKey: .deltaX)
     deltaY = try container.decodeIfPresent(Int.self, forKey: .deltaY)
+    targetPid = try container.decodeIfPresent(Int32.self, forKey: .targetPid)
+    compact = try container.decodeIfPresent(Bool.self, forKey: .compact)
+    toX = try container.decodeIfPresent(Double.self, forKey: .toX)
+    toY = try container.decodeIfPresent(Double.self, forKey: .toY)
     script = try container.decodeIfPresent(String.self, forKey: .script)
     language = try container.decodeIfPresent(String.self, forKey: .language)
     timeout = try container.decodeIfPresent(Double.self, forKey: .timeout)
