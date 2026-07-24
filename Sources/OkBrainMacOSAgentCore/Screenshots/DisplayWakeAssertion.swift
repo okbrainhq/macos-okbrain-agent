@@ -38,12 +38,18 @@ final class DisplayWakeAssertion {
   }
 }
 
+/// Abstraction over display-wake behaviour so callers (and tests) can inject
+/// a mock instead of touching real IOKit assertions.
+public protocol DisplayWaking: AnyObject {
+  func release()
+}
+
 /// Wakes the display only when it is currently asleep, then waits briefly so
 /// the display can become ready. Use to wrap operations that need a live
 /// display (screenshots, accessibility queries, synthetic input events).
 /// When the display is already awake this is a no-op, so there is no added
 /// latency on the hot path.
-final class DisplayWakeGuard {
+final class DisplayWakeGuard: DisplayWaking {
   private var assertion: DisplayWakeAssertion?
 
   init(settleDelay: TimeInterval = 1.0) {

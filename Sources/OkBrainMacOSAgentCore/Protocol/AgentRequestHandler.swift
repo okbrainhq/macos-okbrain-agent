@@ -12,6 +12,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
   private let accessibility: AccessibilityServicing
   private let osascript: OsascriptServicing
   private let remoteControlEnabled: @Sendable () -> Bool
+  private let makeDisplayWake: @Sendable (TimeInterval) -> (any DisplayWaking)?
 
   private let envelopeActions: Set<String> = [
     "agent.status",
@@ -55,7 +56,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
     fileEditing: FileEditingServicing? = nil,
     accessibility: AccessibilityServicing = SystemAccessibilityService(),
     osascript: OsascriptServicing = SystemOsascriptService(),
-    remoteControlEnabled: (@Sendable () -> Bool)? = nil
+    remoteControlEnabled: (@Sendable () -> Bool)? = nil,
+    displayWakeFactory: (@Sendable (TimeInterval) -> (any DisplayWaking)?)? = nil
   ) {
     self.configuration = configuration
     self.permissions = permissions
@@ -64,6 +66,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
     self.accessibility = accessibility
     self.osascript = osascript
     self.remoteControlEnabled = remoteControlEnabled ?? { true }
+    self.makeDisplayWake = displayWakeFactory ?? { settleDelay in DisplayWakeGuard(settleDelay: settleDelay) }
   }
 
   public func handle(requestData: Data) -> Data {
@@ -100,12 +103,13 @@ public final class AgentRequestHandler: @unchecked Sendable {
         throw AgentProtocolError.invalidRequest("Remote control APIs (Accessibility ax.* and AppleScript osascript.run) are disabled in the agent's settings")
       }
 
-      // Wake the display for accessibility commands so AX queries and
-      // synthetic input events work even when the display has gone to sleep.
+      // Wake the display for accessibility and AppleScript commands so AX
+      // queries, synthetic input events, and osascript-driven UI automation
+      // work even when the display has gone to sleep.
       // No-op (no delay) when the display is already awake.
-      var displayWake: DisplayWakeGuard?
-      if accessibilityActions.contains(action) {
-        displayWake = DisplayWakeGuard(settleDelay: 0.5)
+      var displayWake: (any DisplayWaking)?
+      if accessibilityActions.contains(action) || osascriptActions.contains(action) {
+        displayWake = makeDisplayWake(0.5)
       }
       defer { displayWake?.release() }
 
