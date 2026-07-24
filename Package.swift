@@ -23,6 +23,11 @@ let package = Package(
       name: "PermissionRuleEngineTests",
       dependencies: ["OkBrainMacOSAgentCore"],
       path: "Tests/PermissionRuleEngineTests"
+    ),
+    .executableTarget(
+      name: "DisplayWakeTests",
+      dependencies: ["OkBrainMacOSAgentCore"],
+      path: "Tests/DisplayWakeTests"
     )
   ]
 )
