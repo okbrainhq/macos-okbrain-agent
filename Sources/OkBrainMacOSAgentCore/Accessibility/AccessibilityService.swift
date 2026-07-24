@@ -178,7 +178,7 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
       let appElement = AXUIElementCreateApplication(app.processIdentifier)
       let axResult = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
       if axResult != .success {
-        app.activate(options: [.activateIgnoringOtherApps])
+        app.activate()
       }
       return AXPerformPayload(
         action: "activate",
