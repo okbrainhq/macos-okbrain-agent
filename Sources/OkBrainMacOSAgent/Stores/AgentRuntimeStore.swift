@@ -30,7 +30,7 @@ final class AgentRuntimeStore: ObservableObject {
   private static let preventIdleSleepDefaultsKey = "preventIdleSleepEnabled"
   private static let fileEditingEnabledDefaultsKey = "fileEditingEnabled"
   private static let filePermissionRulesDefaultsKey = "filePermissionRules"
-  private static let remoteControlAPIsEnabledDefaultsKey = "remoteControlAPIsEnabled"
+  private nonisolated static let remoteControlAPIsEnabledDefaultsKey = "remoteControlAPIsEnabled"
   private static let preventIdleSleepReason = "OkBrain Agent is running and ready for remote screenshots."
 
   @Published private(set) var configuration: AgentConfiguration

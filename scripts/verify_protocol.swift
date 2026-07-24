@@ -834,12 +834,13 @@ struct FakeAccessibilityService: AccessibilityServicing {
     valueResult
   }
 
-  func typeText(_ text: String) throws {}
+  func typeText(_ text: String, targetPid: Int32?) throws {}
 
-  func keyPress(key: String, modifiers: [String]) throws {}
+  func keyPress(key: String, modifiers: [String], targetPid: Int32?) throws {}
 
-  func clickAt(x: Double, y: Double, button: String, clickCount: Int) throws {}
-  func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?) throws {}
+  func clickAt(x: Double, y: Double, button: String, clickCount: Int, targetPid: Int32?) throws {}
+  func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?, targetPid: Int32?) throws {}
+  func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws {}
 }
 
 final class FakeOsascriptService: OsascriptServicing, @unchecked Sendable {
