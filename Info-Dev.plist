@@ -23,7 +23,7 @@
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>OkBrain Agent needs permission to control other apps via AppleScript — for example to pause Music, set the system volume, or drive Finder — when your assistant asks it to.</string>
+  <string>OkBrain Agent needs permission to run user-approved curated functions that control apps such as Music, Safari, Chrome, or Finder when your assistant asks it to.</string>
   <key>AppEnvironment</key>
   <string>dev</string>
   <key>AppStateDirectoryName</key>

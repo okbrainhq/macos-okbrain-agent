@@ -1,6 +1,6 @@
 # 🪟 macOS Agent Accessibility (`ax.*`) API
 
-**Status:** Implemented in the macOS agent (socket-only, `OKB1` binary frames)
+**Status:** Implemented in the macOS agent (socket-only, `OKB1` binary frames, per-app guardrails)
 **Date:** 2026-07-21
 **Protocol:** `okbrain.macos-agent.v3`
 **Scope:** Let Brain coding agents observe and drive macOS GUI apps via the Accessibility API through the existing agent `.sock`
@@ -26,10 +26,23 @@ All actions run inside the logged-in GUI session by the macOS agent app, which a
 Every `ax.*` action requires **Accessibility** permission (`AXIsProcessTrusted()`).
 
 - Not granted → error envelope `permission_denied` (`"Accessibility permission is not granted"`).
-- Granted → `agent.status` `capabilities` includes the eleven `ax.*` actions.
+- Granted → `agent.status` `capabilities` includes the twelve `ax.*` actions.
 - Keyboard/mouse event synthesis (`ax.type-text`, `ax.key-press`, `ax.click-at`) is covered by the same Accessibility trust — no extra TCC prompt.
 
 Check `permissions.status` (or `agent.status → permissions.accessibility`) before calling.
+
+### Per-app guardrails
+
+Accessibility trust is necessary but not sufficient for `ax.*` access. The agent resolves a target app before dispatching each request: `targetPid` first, then query `pid`, then `appName`; untargeted synthetic input resolves the current frontmost app and dispatches to that captured PID. This prevents focus changes from redirecting typed keys or clicks after approval.
+
+- **Default deny:** there is no stored Deny rule. A missing rule has no access until the local user grants it manually or from a popup.
+- **Read actions** (`ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.get-value`) require a validated application bundle ID and **Observe** or **Control** access.
+- **Write actions** (`ax.perform`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, `ax.scroll`, `ax.drag`) require that same target plus **Control**. Control also permits all reads.
+- `ax.list-apps` requires **Observe** for the global **Application Discovery** category; it is not a default process-list exemption.
+- An unresolved app target fails closed with `app_permission_required`, `pending: false`; it never opens a prompt or creates a pending request.
+- Popups request the exact level: Allow Once, Always Allow Observe/Control, or Not Now. Timeouts queue a validated target/intent in the menu bar; Not Now and Dismiss persist no negative rule.
+
+Manage application rules and always-available global categories in **File Permissions → App & Global Access**. Choose installed apps through the native `.app` browser rather than from a running-app list. The global Remote Control APIs toggle disables both `ax.*` and `functions.run` execution.
 
 ---
 
@@ -74,11 +87,11 @@ All requests use the standard frame:
 
 Responses are standard envelopes (`ok`, `data`). No action returns a binary body.
 
-Eleven actions: `ax.list-apps`, `ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.perform`, `ax.get-value`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, `ax.scroll`.
+Twelve actions: `ax.list-apps`, `ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.perform`, `ax.get-value`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, `ax.scroll`, and `ax.drag`.
 
 ### `ax.list-apps` — list running GUI apps
 
-Params: none.
+Requires **Observe** access for the global **Application Discovery** category. Params: none.
 
 ```json
 {

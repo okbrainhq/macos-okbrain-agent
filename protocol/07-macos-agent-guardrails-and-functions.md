@@ -1,95 +1,125 @@
 # 🛡️ macOS Agent Guardrails & Curated Functions — Design Doc
 
-> Status: **Design (approved direction, not yet implemented)**
-> Audience: implementing agent. Read `protocol/02` (file editing rules), `protocol/04` (AX API), and `protocol/05` (osascript API) first.
+> Status: **Implemented (guardrails, curated catalog, local controls, and verification coverage)**
+> Audience: maintainers and integrators. Read `protocol/02` (file editing rules) and `protocol/04` (AX API); `protocol/05` is now a retirement stub.
 > Goal: add **per-app permission guardrails** to `ax.*` and replace raw `osascript.run` with a **curated function catalog**. This is *guidance*, not a sandbox — it prevents accidental overreach by the remote agent and gives the user visibility and control.
 
 ---
 
-## 1. Background & Current State
+## 1. Pre-Rollout Background
 
-| Surface | Today |
+The table records the surface **before** this rollout; §§2–3 describe the implemented replacement.
+
+| Surface | Before rollout |
 | --- | --- |
 | `fs.*` file editing | Full rule engine (`FilePermissionRuleEngine`): path rules, `disabled`/`read-only`/`read-write`, longest-prefix match, `realpath` normalization, **default-deny**. Persisted in UserDefaults, managed in `PermissionRulesView`. |
 | `ax.*` accessibility | Only a global kill-switch (`remoteControlAPIsEnabled` UserDefaults flag, checked in `AgentRequestHandler.handle`). No per-app scoping. Write actions post synthetic CGEvents globally or to a target pid (CGEvent field 89). |
-| `osascript.run` | Same kill-switch only. Pipes arbitrary AppleScript/JXA to `/usr/bin/osascript` with the user's full privileges. `do shell script` bypasses *all* file rules. |
+| `osascript.run` | Same kill-switch only. It accepted arbitrary AppleScript/JXA through `/usr/bin/osascript`, including `do shell script` outside the file-rule layer. This socket action is now removed. |
 
-Existing building blocks to reuse:
+Existing building blocks used by the implementation:
 
-- `FilePermissionRuleEngine` + `FileEditingAllowedRoot` — the pattern to mirror.
-- `AutomationPermissionService` (`Sources/OkBrainMacOSAgentCore/Osascript/`) — wraps `AEDeterminePermissionToAutomateTarget` for per-app macOS **TCC Automation** status/prompting. Used by "Settings → AppleScript App Access". See trick *"macOS Automation permission API"* for signature/error-code mapping.
+- `FilePermissionRuleEngine` + `FileEditingAllowedRoot` — the pattern mirrored by App & Global Access rules.
+- `AutomationPermissionService` (`Sources/OkBrainMacOSAgentCore/Osascript/`) — wraps `AEDeterminePermissionToAutomateTarget` for per-app macOS **TCC Automation** status/prompting. Curated functions preflight it and the local Remote Control settings link to macOS Automation settings. See trick *"macOS Automation permission API"* for signature/error-code mapping.
 - `AgentRuntimeStore` — `@Published` settings + UserDefaults persistence pattern (`filePermissionRules`, `remoteControlAPIsEnabled`).
 - `AgentRequestHandler` — single choke point: every protocol action passes through `handle`.
-- `AccessibilityServicing` / `OsascriptServicing` are protocols — decorators/wrappers insert cleanly.
+- `AccessibilityServicing` — protocol boundary retained for guarded AX dispatch and verifier fakes; the raw `OsascriptServicing` socket surface was retired.
 
 ---
 
-## 2. Part A — Per-App AX Permission Guard
+## 2. Part A — Explicit App & Global Access Guard
 
-### 2.1 Rule model
+### 2.1 Default-deny target model
 
 ```swift
 enum AXAppPermissionMode: String, Codable {
-  case deny      // nothing allowed
-  case observe   // read actions only
-  case control   // read + write actions
+  case observe   // inspect only
+  case control   // inspect + change
 }
 
-struct AXAppPermissionRule: Codable, Equatable, Identifiable {
-  var bundleID: String     // e.g. "com.apple.Terminal"
-  var appName: String      // display only
+enum PermissionTargetKind: String, Codable {
+  case application  // real bundle ID
+  case category     // stable global capability ID
+}
+
+struct PermissionTarget: Codable, Identifiable {
+  var kind: PermissionTargetKind
+  var identifier: String     // bundle ID or category ID
+  var displayName: String
+  var pid: Int32?            // captured only for app dispatch
+}
+
+struct AXAppPermissionRule: Codable, Identifiable {
+  var target: PermissionTarget
   var mode: AXAppPermissionMode
 }
 ```
 
-- `AXPermissionRuleEngine(rules:)` mirrors `FilePermissionRuleEngine`.
-- **Read actions:** `ax.list-apps`, `ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.get-value` → need `observe` or `control`.
-- **Write actions:** `ax.perform`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, `ax.scroll`, `ax.drag` → need `control`.
-- **Default posture for unknown apps:** `control`-equivalent *today's behavior is preserved for reads*; **writes to unknown apps trigger the permission prompt** (§2.3). Reads stay allowed (observe-by-default) — user decision: "read ops are okay, write ops need permission".
+- There is **no Deny rule**. The absence of a rule is the default-deny state.
+- **Observe** permits read/inspection operations only. **Control** subsumes Observe and also permits actions that alter UI or system state.
+- Every app-specific AX action needs an explicit grant: reads request **Observe**; writes request **Control**. A local user may grant through the App & Global Access screen or the matching popup.
+- A grant never uses a fake bundle ID. Global capabilities use `PermissionTargetKind.category` and an allow-listed stable category ID.
+- A legacy persisted `deny` record is migrated to **no rule**; legacy Observe/Control rules remain valid. Legacy pending requests are migrated as Control requests because the earlier UI only queued control prompts.
 
-### 2.2 Target resolution
+### 2.2 Targets and categories
 
-Every decision resolves a **target bundle ID** before dispatch:
+Application targets resolve to a verified bundle ID before a popup can be shown:
 
-1. If the request query has `pid` → `NSRunningApplication(processIdentifier:)?.bundleIdentifier`.
-2. Else if query has `appName` → match against running apps (same lookup the AX service already does) → bundleID.
-3. Else (untargeted CGEvent actions: `type-text`/`key-press`/`click-at` with no `targetPid`) → `NSWorkspace.shared.frontmostApplication` **at call time**. These events go to whatever is focused; this is the main bypass hole and must be covered.
-4. If no target can be resolved → treat as unknown app → prompt on writes, allow reads.
+1. `targetPid`, then query `pid` → `NSRunningApplication(processIdentifier:)?.bundleIdentifier`.
+2. Query `appName` → one matching running app/bundle ID.
+3. Untargeted synthetic input (`type-text`, `key-press`, `click-at`, `scroll`, `drag`) captures `NSWorkspace.shared.frontmostApplication` at request time and dispatches to that same PID.
+4. A target that cannot resolve to a valid bundle ID fails closed with `app_permission_required`, `pending: false`; it cannot prompt, queue, or create a grant.
+
+`ax.list-apps` and `app.list` are not implicit exceptions: they require **Observe** for the global **Application Discovery** category.
+
+The always-available global categories are:
+
+| Category | Observe examples | Control examples |
+| --- | --- | --- |
+| Application Discovery | `ax.list-apps`, `app.list` | — |
+| System Audio | `system.get-volume` | `system.set-volume`, `system.mute` |
+| Clipboard | `system.get-clipboard` | `system.set-clipboard` |
+| Power & Battery | `system.get-battery` | — |
+| Network Information | `system.get-wifi-name` | — |
+| Notifications | — | `system.notify` |
+| User Dialogs | — | `dialog.ask-user` |
 
 ### 2.3 Permission prompt (sync + async fallback)
 
-User decision: **sync popup with 10s timeout, then async fallback.**
+When a valid target lacks the requested level, `AXPermissionPrompter` presents a main-thread `NSAlert` for the exact intent:
 
-Flow when a write action targets an app without `control`:
+1. The alert names the app/category, requested action, requested **Observe** or **Control** level, and context. Its buttons are **Allow Once**, **Always Allow Observe/Control**, and **Not Now**.
+2. Observe grants only Observe. Control grants Control, which also satisfies later Observe requests. **Not Now** persists no negative decision.
+3. The alert expires after 10 seconds. A timeout returns `app_permission_required` and, only for a validated target, creates a sanitized menu-bar pending request with the same intent. The bounded persisted inbox holds at most 50 de-duplicated target/intent/action entries.
+4. Pending requests offer intent-specific Allow Once / Always Allow actions or **Dismiss**. Dismiss persists no rule.
 
-1. `AXPermissionPrompter` (new protocol, injectable for tests) shows an `NSAlert` on the main thread:
-   - App icon + name, the requested action (e.g. `ax.perform → press "Delete"`), and the calling context.
-   - Buttons: **Allow Once**, **Allow Always** (persists/updates rule to `control`), **Deny**.
-   - 10-second countdown label; **default on timeout = Deny**.
-2. Response wired back to the waiting request (async/await continuation; the socket handler already supports long-running actions — cf. `osascript.run` default 30s timeout).
-3. **Timeout or app-not-foregroundable** → request fails with `app_permission_required` **and** a pending entry is added to the **menu-bar badge**: menu shows "Pending permission requests (n)" where the user can Allow/Deny later. The remote agent retries on its next turn.
-
-Protocol error (new, in `AgentProtocolError`):
+Example error:
 
 ```json
 { "ok": false,
   "error": { "code": "app_permission_required",
-    "message": "Control of Safari requires user approval",
-    "details": { "bundleID": "com.apple.Safari", "appName": "Safari",
-                 "action": "ax.perform", "pending": true } } }
+    "message": "Observe access to Safari requires local approval",
+    "details": {
+      "targetKind": "application",
+      "targetID": "com.apple.Safari",
+      "bundleID": "com.apple.Safari",
+      "appName": "Safari",
+      "intent": "observe",
+      "action": "ax.get-tree",
+      "pending": true
+    } } }
 ```
-
-`pending: true` = queued in menu-bar pending list (timeout path); `pending: false` = user actively denied.
 
 ### 2.4 Config, persistence, UI
 
-- Persist `[AXAppPermissionRule]` in UserDefaults via `AgentRuntimeStore` (`@Published private(set) var axAppPermissionRules`, `addAXAppPermissionRule/update/remove` — same shape as `filePermissionRules`).
-- Injected into `AgentRequestHandler` as a closure/provider, same as `remoteControlEnabled`.
-- **UI:** extend `PermissionRulesView` with an "App Control" section: table of rules (app icon, name, mode dropdown), add via running-apps picker, remove; plus the pending-requests list surfaced in the menu-bar menu.
+- `AgentRuntimeStore` persists generalized `[AXAppPermissionRule]` records and exposes them as `permissionRules`.
+- **App & Global Access** always shows the seven global capability choices in its Target picker.
+- Applications are added only through **Choose Application…**, a native `.app` file browser. The selected bundle is validated with `Bundle(url:)`, bundle ID validation, and de-duplication; a running-process list is not the permission source.
+- The rule table exposes only Observe and Control. Removing a rule revokes its matching session grant as well.
+- Timed-out requests appear in the app and menu bar with their requested intent.
 
 ### 2.5 Enforcement point
 
-In `AgentRequestHandler.handle`, before dispatching any `ax.*` action: resolve target (§2.2) → consult engine → allow / prompt / deny. Keep enforcement in the handler (not the service) so tests can drive it with a fake engine/prompter.
+`AgentRequestHandler` is the choke point. It resolves the target, asks the coordinator for the exact intent, and repeats a no-prompt authorization check immediately before dispatch. For AX writes it additionally verifies that the captured PID still belongs to the authorized bundle. For functions it rejects any execution plan that does not declare a valid application or global-category permission target. The global Remote Control switch is rechecked after prompts/TCC waits and before dispatch.
 
 ---
 
@@ -99,69 +129,79 @@ Three protocol actions replace the free-form script surface:
 
 | Action | Purpose |
 | --- | --- |
-| `functions.list` | Return the catalog: name, description, arg schema, tier, enabled state, TCC automation status of target app |
+| `functions.list` | Return the catalog: name, description, arg schema, tier, enabled state, app/TCC metadata, and static global `permissionTarget` category metadata where available |
 | `functions.run` | Run one function with validated args |
 | `functions.propose` | Agent proposes a new function → lands in a user-facing proposals inbox |
 
-### 3.1 Registry
+### 3.1 Registry and dispatch
 
 ```swift
 protocol MacOSFunction {
-  var name: String { get }                 // "browser.get-url"
+  var name: String { get }
   var summary: String { get }
-  var tier: FunctionTier { get }           // .read | .write | .elevated
-  var targetBundleID: String? { get }      // nil = no Apple Events needed
-  var argSchema: [FunctionArg] { get }     // name, type, required, description, constraints
-  func run(args: [String: Any]) throws -> FunctionResult
+  var tier: FunctionTier { get }            // .read | .write | .elevated
+  var argSchema: [FunctionArg] { get }
+  func makeExecutionPlan(args: [String: JSONValue]) throws -> FunctionExecutionPlan
+  func run(plan: FunctionExecutionPlan) throws -> FunctionResult
+}
+
+struct FunctionExecutionPlan {
+  var target: FunctionTarget?               // app target / TCC when applicable
+  var permissionTarget: PermissionTarget?   // required for every execution
 }
 ```
 
-- `FunctionRegistry` holds implementations; dispatcher validates name + args (type, required, enum/range constraints) before calling `run`.
-- Dispatch pipeline for `functions.run`:
-  1. Lookup → `unknown_function`.
-  2. Validate args → `invalid_args`.
-  3. Tier check → tier-2 functions respect per-function enable toggles; tier-3 are off by default → `function_disabled`.
-  4. **Permission gate:** tier-2/3 functions with a `targetBundleID` consult the **same `AXPermissionRuleEngine`** (Part A) — writes need `control` for the target app; this reuses the popup flow. (`app.*` write ops are gated this way — user decision: "app.list/launch/activate/quit/is-running good, but approve based on the ax list".)
-  5. **TCC preflight:** if `targetBundleID != nil` and the backend uses Apple Events, call `AutomationPermissionService.status(forBundleID:)`; if not determined → `requestAccess` once; if denied → `automation_permission_required` with `details.bundleID` (agent tells user to grant in Settings → AppleScript App Access).
-  6. `run(args)`; map thrown errors → `function_failed` with message.
+`FunctionRegistry` validates function name and args before building a plan. The handler rejects a plan with no valid `permissionTarget`, so an unbound backend cannot silently bypass the access gate.
 
-### 3.2 Function catalog (final — user-approved)
+`functions.run` dispatches in this order:
 
-**Tier 1 — read ops (allowed by default, no prompt):**
+1. Lookup → `unknown_function`.
+2. Validate args → `invalid_args`.
+3. Apply the local Tier-2/Tier-3 enable toggle → `function_disabled`.
+4. Require **Observe** for Tier 1 or **Control** for Tier 2/3 against the plan’s application or global-category target. This may show the exact-intent popup.
+5. For app targets using Apple Events, preflight TCC Automation; a denied target returns `automation_permission_required`.
+6. Canonicalize required file paths through the file service.
+7. Immediately before dispatch, re-check the global Remote Control switch, function enablement/template identity, and non-prompting permission grant.
+8. Run the fixed backend; encoded result/output is bounded to 1 MiB.
 
-| Function | Backend | Notes |
+A Tier-1 function is *catalog-enabled* by default, but it is **not permission-enabled**: it still needs the explicit Observe grant for its target/category.
+
+### 3.2 Function catalog and permission targets
+
+**Tier 1 — read operations (explicit Observe required):**
+
+| Function | Permission target | Backend / notes |
 | --- | --- | --- |
-| `app.list` | NSWorkspace | running apps: name, bundleID, pid, frontmost |
-| `app.is-running` | NSWorkspace | arg: `bundleID` or `name` |
-| `system.get-volume` | osascript fixed string | output/mute state |
-| `system.get-clipboard` | NSPasteboard | text only |
-| `system.get-battery` | IOKit | %, charging |
-| `system.get-wifi-name` | CoreWLAN | current SSID |
-| `media.now-playing` | ScriptingBridge | Music/Spotify: track, artist, state |
-| `browser.get-url` / `browser.get-title` / `browser.list-tabs` | ScriptingBridge | arg: `browser` enum(`safari`,`chrome`) — Firefox unsupported (no tab AppleScript) |
-| `finder.get-selection` | ScriptingBridge | selected file paths |
-| `finder.get-front-path` | ScriptingBridge | path of front Finder window |
+| `app.list` | Application Discovery | NSWorkspace running app list |
+| `app.is-running` | requested app bundle | name resolves uniquely before status is returned |
+| `system.get-volume` | System Audio | fixed AppleScript volume/mute state |
+| `system.get-clipboard` | Clipboard | plain text only |
+| `system.get-battery` | Power & Battery | IOKit capacity/charging |
+| `system.get-wifi-name` | Network Information | CoreWLAN SSID |
+| `media.now-playing` | Music or Spotify app | current track metadata |
+| `browser.get-url` / `browser.get-title` / `browser.list-tabs` | Safari or Chrome app | active browser tab/window |
+| `finder.get-selection` / `finder.get-front-path` | Finder app | current Finder paths |
 
-**Tier 2 — write ops (enabled per function; target app needs `control` via Part A):**
+**Tier 2 — write operations (per-function toggle + explicit Control):**
 
-| Function | Backend | Notes |
+| Function | Permission target | Notes |
 | --- | --- | --- |
-| `app.launch` / `app.activate` / `app.quit` | NSWorkspace | gated by AX rule for the target app; `quit` = graceful only |
-| `system.set-volume` / `system.mute` | osascript fixed string (`set volume output volume <int>`) | int 0–100, interpolated — no injection surface |
-| `system.set-clipboard` | NSPasteboard | |
-| `system.notify` | UNUserNotification (fallback: fixed osascript) | fixed "OkBrain Agent" branding — prevents phishing-style dialogs |
-| `media.play-pause` / `media.next` / `media.previous` | ScriptingBridge | arg: `player` enum(`music`,`spotify`) |
-| `browser.open-url` | ScriptingBridge | opens in new tab of chosen browser |
-| `finder.reveal` | ScriptingBridge / NSWorkspace | **path validated by `FilePermissionRuleEngine` first** |
-| `dialog.ask-user` | osascript fixed template | fixed agent-branded title; returns text/buttons |
+| `app.launch` / `app.activate` / `app.quit` | requested app bundle | `quit` remains graceful only |
+| `system.set-volume` / `system.mute` | System Audio | fixed bounded input |
+| `system.set-clipboard` | Clipboard | plain text only |
+| `system.notify` | Notifications | fixed OkBrain Agent branding |
+| `media.play-pause` / `media.next` / `media.previous` | Music or Spotify app | player enum |
+| `browser.open-url` | Safari or Chrome app | opens a new tab |
+| `finder.reveal` | Finder app + file read rule | canonical, symlink-safe file check first |
+| `dialog.ask-user` | User Dialogs | fixed agent-branded dialog |
 
-**Tier 3 — elevated (off by default, explicit enable, and still needs `control` on target):**
+**Tier 3 — elevated (off by default + explicit Control):**
 
-| Function | Backend | Notes |
+| Function | Permission target | Notes |
 | --- | --- | --- |
-| `browser.run-javascript` | ScriptingBridge (`do JavaScript` / `execute javascript`) | arg: `browser`, `script`; powerful — gate hard |
+| `browser.run-javascript` | Safari or Chrome app | powerful; output remains bounded |
 
-**Explicitly excluded (user decision):** `finder.move-to-trash`, `finder.empty-trash`. File mutations go through `fs.*` where path rules apply.
+`finder.move-to-trash` and `finder.empty-trash` remain excluded; file mutation belongs to `fs.*` under file rules. Screenshot capture remains governed by Screen Recording TCC and is not a curated function category.
 
 ### 3.3 `functions.propose`
 
@@ -169,9 +209,11 @@ Params: `{ name, description, rationale, exampleScript? }`.
 
 - Stored (UserDefaults/JSON) as a **proposals inbox**, surfaced in Settings with approve/reject.
 - **Approved proposals become stored templates**, not runtime codegen:
-  - The `exampleScript` is frozen at approval time (user sees the exact script).
-  - Lexical rejection: `do shell script`, `with administrator privileges`, nested `osascript` → cannot be approved.
+  - The user must review the **full source** in Settings; approval submits the visible SHA-256 digest. The immutable template persists the exact source, digest, placeholders, one reviewed target bundle ID/app name, and its Automation requirement.
+  - Approval accepts only a small, literal grammar: one `tell application id "bundle.id" … end tell` block for an installed target. Dynamic, unresolved, or multi-target scripts stay unapproved; legacy persisted templates decode but remain disabled until re-reviewed.
+  - Lexical rejection blocks shell/admin execution, nested `osascript`, `run script`, scripting additions, raw Apple Events, comments/continuations, and other dynamic/file-system constructs.
   - Args substitute into fixed `$placeholder`s only (typed: string args are AppleScript-escaped by the implementation, never raw-concatenated).
+  - The internal AppleScript executor drains stdout/stderr concurrently under a 1 MiB shared cap and terminates/force-kills timed-out or over-limit work.
 - This is guidance-layer design: it keeps the escape hatch for long-tail needs *with explicit user opt-in per function*, without reopening arbitrary script execution.
 
 ### 3.4 Removing raw `osascript.run` entirely
@@ -187,7 +229,7 @@ Params: `{ name, description, rationale, exampleScript? }`.
 
 | Code | When |
 | --- | --- |
-| `app_permission_required` | AX/function write to app without `control` (see §2.3 payload) |
+| `app_permission_required` | AX/function Observe or Control request lacks an explicit grant, is dismissed, or times out (see §2.3 payload) |
 | `unknown_function` | `functions.run` name not in registry |
 | `invalid_args` | arg schema validation failure (details list violations) |
 | `function_disabled` | tier gating (Tier-2/3 function not enabled) |
@@ -198,13 +240,10 @@ Params: `{ name, description, rationale, exampleScript? }`.
 
 ## 4. Testing Plan
 
-- `Tests/` (Swift Testing, mirrors `PermissionRuleEngineTests`):
-  - `AXPermissionRuleEngine` — bundleID matching, mode gating, unknown-app posture.
-  - Target resolution — pid/appName/frontmost/unresolvable (fake `NSRunningApplication` provider).
-  - Popup flow — fake prompter: allow-once, allow-always (rule persisted), deny, **timeout → deny + pending entry**.
-  - Registry — schema validation (missing/extra/wrong-type args), tier gating, TCC preflight branching (fake `AutomationPermissionServicing`).
-  - Proposal templates — lexical rejection cases, placeholder substitution/escaping.
-- `scripts/verify_protocol.swift` — envelope + capabilities for `functions.*`, `osascript.run` → `unknown_action` after removal, `app_permission_required` shape. Run via `./scripts/test.sh`.
+- `Tests/` exercises file-rule containment and the executable smoke targets.
+- `scripts/verify_protocol.swift` covers default-denied Observe and Control, Observe-versus-Control upgrades, session/persistent grants and rule removal, Not Now/timeout/pending behavior, legacy Deny migration, validated global category targets, Application Discovery, captured PID dispatch, unapproved app-status queries, TCC branches, template identity/source protection, `finder.reveal` containment, and output limits.
+- The verifier also asserts every built-in unbound function declares one of the always-available global categories and that a function plan without any permission target fails closed.
+- `scripts/test.sh` runs both Swift executable targets and all protocol/patch/bundle checks before handoff.
 - Live-testing of AX popup via the workflow in trick *"macOS agent AX API — usage rules & live-testing workflow"*.
 
 ---
@@ -228,5 +267,5 @@ Params: `{ name, description, rationale, exampleScript? }`.
 ## 7. Open Questions
 
 - Allow-once grants: in-memory only for the session, or decay after N minutes? (Default: session.)
-- Should `browser.run-javascript` results be size-capped like file reads? (Default: yes, reuse `limits.maxReadBytes`-style cap.)
+- `browser.run-javascript` and every function result are size-capped (1 MiB encoded result/output limit).
 - Menu-bar pending requests: auto-expire? (Default: persist until acted on.)

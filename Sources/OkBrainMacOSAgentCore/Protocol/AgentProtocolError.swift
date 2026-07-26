@@ -5,6 +5,7 @@ public enum AgentProtocolError: Error, Sendable {
   case protocolMismatch(String)
   case unsupportedProtocol(String)
   case unsupportedAction(String)
+  case unknownAction(String)
   case unsupportedMode(String)
   case unsupportedFormat(String)
   case unsupportedParameter(String)
@@ -26,6 +27,12 @@ public enum AgentProtocolError: Error, Sendable {
   case appNotFound(String)
   case elementNotFound(String)
   case actionFailed(String)
+  case appPermissionRequired(String, details: JSONValue)
+  case unknownFunction(String)
+  case invalidArgs(String, details: JSONValue)
+  case functionDisabled(String)
+  case automationPermissionRequired(String, details: JSONValue)
+  case functionFailed(String, details: JSONValue?)
   case operationTimeout(String)
   case internalError(String)
 
@@ -39,6 +46,8 @@ public enum AgentProtocolError: Error, Sendable {
       "unsupported_protocol"
     case .unsupportedAction:
       "unsupported_action"
+    case .unknownAction:
+      "unknown_action"
     case .unsupportedMode:
       "unsupported_mode"
     case .unsupportedFormat:
@@ -81,6 +90,18 @@ public enum AgentProtocolError: Error, Sendable {
       "element_not_found"
     case .actionFailed:
       "action_failed"
+    case .appPermissionRequired:
+      "app_permission_required"
+    case .unknownFunction:
+      "unknown_function"
+    case .invalidArgs:
+      "invalid_args"
+    case .functionDisabled:
+      "function_disabled"
+    case .automationPermissionRequired:
+      "automation_permission_required"
+    case .functionFailed:
+      "function_failed"
     case .operationTimeout:
       "operation_timeout"
     case .internalError:
@@ -94,6 +115,7 @@ public enum AgentProtocolError: Error, Sendable {
          .protocolMismatch(let message),
          .unsupportedProtocol(let message),
          .unsupportedAction(let message),
+         .unknownAction(let message),
          .unsupportedMode(let message),
          .unsupportedFormat(let message),
          .unsupportedParameter(let message),
@@ -114,11 +136,30 @@ public enum AgentProtocolError: Error, Sendable {
          .appNotFound(let message),
          .elementNotFound(let message),
          .actionFailed(let message),
+         .appPermissionRequired(let message, _),
+         .unknownFunction(let message),
+         .invalidArgs(let message, _),
+         .functionDisabled(let message),
+         .automationPermissionRequired(let message, _),
+         .functionFailed(let message, _),
          .operationTimeout(let message),
          .internalError(let message):
       message
     case .responseTooLarge(let size):
       "Screenshot response exceeds the configured limit: \(size) bytes"
+    }
+  }
+
+  public var details: JSONValue? {
+    switch self {
+    case .appPermissionRequired(_, let details),
+         .invalidArgs(_, let details),
+         .automationPermissionRequired(_, let details):
+      details
+    case .functionFailed(_, let details):
+      details
+    default:
+      nil
     }
   }
 }

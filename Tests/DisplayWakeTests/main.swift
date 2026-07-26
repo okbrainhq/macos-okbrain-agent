@@ -121,9 +121,22 @@ struct FakeAccessibilityService: AccessibilityServicing {
   func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws {}
 }
 
-final class FakeOsascriptService: OsascriptServicing, @unchecked Sendable {
-  func run(script: String, language: String, timeout: TimeInterval) throws -> OsascriptRunPayload {
-    OsascriptRunPayload(language: language, exitCode: 0, stdout: "ok\n", stderr: "", timedOut: false)
+struct FakeReadFunction: MacOSFunction {
+  let name = "test.read"
+  let summary = "A test-only read function."
+  let tier: FunctionTier = .read
+  let argSchema: [FunctionArg] = []
+  let catalogTargetBundleID: String? = nil
+
+  func makeExecutionPlan(args: [String: JSONValue]) throws -> FunctionExecutionPlan {
+    FunctionExecutionPlan(
+      args: try validateFunctionArgs(args, schema: []),
+      permissionTarget: GlobalPermissionCategory.power.permissionTarget
+    )
+  }
+
+  func run(plan: FunctionExecutionPlan) throws -> FunctionResult {
+    FunctionResult(value: .object("ok", .bool(true)))
   }
 }
 
@@ -158,7 +171,7 @@ func send<T: Decodable>(_ request: AgentRequest, to handler: AgentRequestHandler
 @main
 enum DisplayWakeTests {
   static func main() throws {
-    try osascriptRunTriggersDisplayWake()
+    try functionRunTriggersDisplayWake()
     try axActionTriggersDisplayWake()
     try nonRemoteActionDoesNotTriggerDisplayWake()
     try displayWakeIsReleasedAfterHandling()
@@ -178,29 +191,33 @@ enum DisplayWakeTests {
       permissions: FakePermissionService(),
       screenshots: FakeScreenshotService(),
       accessibility: FakeAccessibilityService(),
-      osascript: FakeOsascriptService(),
+      functionRegistry: FunctionRegistry(functions: [FakeReadFunction()]),
+      axPermissionCoordinator: AXPermissionCoordinator(rules: [
+        AXAppPermissionRule(target: GlobalPermissionCategory.power.permissionTarget, mode: .observe),
+        AXAppPermissionRule(target: GlobalPermissionCategory.applicationDiscovery.permissionTarget, mode: .observe)
+      ]),
       displayWakeFactory: { settleDelay in spy.makeWake(settleDelay: settleDelay) }
     )
   }
 
-  /// osascript.run must trigger the display wake factory.
-  private static func osascriptRunTriggersDisplayWake() throws {
+  /// functions.run must trigger the display wake factory.
+  private static func functionRunTriggersDisplayWake() throws {
     let spy = DisplayWakeSpy()
     let handler = makeHandler(spy: spy)
-    spy.pendingAction = "osascript.run"
+    spy.pendingAction = "functions.run"
 
-    let result: Envelope<OsascriptRunPayload> = try send(
+    let result: Envelope<FunctionRunPayload> = try send(
       AgentRequest(
-        id: "test_osascript_wake",
-        action: "osascript.run",
-        params: AgentRequestParams(script: "return 1", language: "applescript", timeout: 5)
+        id: "test_function_wake",
+        action: "functions.run",
+        params: AgentRequestParams(functionName: "test.read", args: [:])
       ),
       to: handler
     )
 
-    expect(result.ok, "osascript.run should succeed")
-    expectEqual(spy.callCount, 1, "osascript.run must trigger display wake factory")
-    expectEqual(spy.invocations.first?.action, "osascript.run", "factory should record osascript.run action")
+    expect(result.ok, "functions.run should succeed")
+    expectEqual(spy.callCount, 1, "functions.run must trigger display wake factory")
+    expectEqual(spy.invocations.first?.action, "functions.run", "factory should record functions.run action")
   }
 
   /// ax.* actions must trigger the display wake factory.
@@ -238,13 +255,13 @@ enum DisplayWakeTests {
   private static func displayWakeIsReleasedAfterHandling() throws {
     let spy = DisplayWakeSpy()
     let handler = makeHandler(spy: spy)
-    spy.pendingAction = "osascript.run"
+    spy.pendingAction = "functions.run"
 
-    let _: Envelope<OsascriptRunPayload> = try send(
+    let _: Envelope<FunctionRunPayload> = try send(
       AgentRequest(
         id: "test_release",
-        action: "osascript.run",
-        params: AgentRequestParams(script: "return 1", language: "applescript", timeout: 5)
+        action: "functions.run",
+        params: AgentRequestParams(functionName: "test.read", args: [:])
       ),
       to: handler
     )
@@ -257,13 +274,13 @@ enum DisplayWakeTests {
   private static func displayWakeSettleDelayIsCorrect() throws {
     let spy = DisplayWakeSpy()
     let handler = makeHandler(spy: spy)
-    spy.pendingAction = "osascript.run"
+    spy.pendingAction = "functions.run"
 
-    let _: Envelope<OsascriptRunPayload> = try send(
+    let _: Envelope<FunctionRunPayload> = try send(
       AgentRequest(
         id: "test_settle",
-        action: "osascript.run",
-        params: AgentRequestParams(script: "return 1", language: "applescript", timeout: 5)
+        action: "functions.run",
+        params: AgentRequestParams(functionName: "test.read", args: [:])
       ),
       to: handler
     )
