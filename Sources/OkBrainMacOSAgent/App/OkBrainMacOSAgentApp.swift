@@ -30,9 +30,29 @@ struct OkBrainMacOSAgentApp: App {
     }
     .defaultSize(width: 920, height: 620)
 
-    MenuBarExtra("OkBrain Agent", systemImage: "brain.head.profile") {
+    MenuBarExtra {
       MenuBarView()
         .environmentObject(AgentRuntimeStore.shared)
+    } label: {
+      MenuBarLabel()
     }
+  }
+}
+
+/// Menu bar icon that overlays a small orange dot when permission requests are
+/// pending, giving the user a visible cue without opening the menu.
+struct MenuBarLabel: View {
+  @ObservedObject private var store = AgentRuntimeStore.shared
+
+  var body: some View {
+    Image(systemName: "brain.head.profile")
+      .overlay(alignment: .topTrailing) {
+        if !store.pendingAXPermissionRequests.isEmpty {
+          Circle()
+            .fill(.orange)
+            .frame(width: 7, height: 7)
+            .offset(x: 1, y: -1)
+        }
+      }
   }
 }
