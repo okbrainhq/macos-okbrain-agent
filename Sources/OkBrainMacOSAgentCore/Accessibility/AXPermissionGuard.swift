@@ -478,7 +478,7 @@ public protocol AXPermissionPrompting: Sendable {
   func prompt(_ request: AXPermissionPromptRequest, timeout: TimeInterval) -> AXPermissionPromptResponse
 }
 
-/// AppKit implementation of the synchronous 10-second approval experience.
+/// AppKit implementation of the synchronous 15-second approval experience.
 /// The socket worker waits off-main-thread while the alert runs in AppKit's
 /// modal loop; declining or timing out persists no negative rule.
 public final class SystemAXPermissionPrompter: AXPermissionPrompting, @unchecked Sendable {
@@ -508,10 +508,22 @@ public final class SystemAXPermissionPrompter: AXPermissionPrompting, @unchecked
 
   private func present(_ request: AXPermissionPromptRequest, timeout: TimeInterval) -> AXPermissionPromptResponse {
     guard NSApp != nil else { return .timedOut }
+
+    // Ensure the app can become key: accessory-policy apps cannot present
+    // modal alerts, so promote to regular before activating.
+    if NSApp.activationPolicy() == .accessory {
+      NSApp.setActivationPolicy(.regular)
+    }
+
+    // Attempt activation with multiple strategies. Even if all fail, we still
+    // present the alert below — it may appear behind other windows but the
+    // user can reach it via the Dock/menu bar instead of silently timing out.
     if !NSApp.isActive {
       NSApp.activate(ignoringOtherApps: true)
     }
-    guard NSApp.isActive else { return .timedOut }
+    if !NSApp.isActive {
+      NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+    }
 
     let alert = NSAlert()
     alert.alertStyle = .warning
@@ -793,7 +805,7 @@ public final class AXPermissionCoordinator: @unchecked Sendable {
     guard let request = Self.sanitizedPromptRequest(target: target, intent: intent, action: action, context: context) else {
       throw invalidPromptTargetError(target: target, intent: intent, action: action)
     }
-    let response = prompter.prompt(request, timeout: 10)
+    let response = prompter.prompt(request, timeout: 15)
 
     switch response {
     case .allowOnce:
