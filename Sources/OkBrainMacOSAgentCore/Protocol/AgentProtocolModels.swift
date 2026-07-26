@@ -88,10 +88,14 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
   public var toX: Double?
   public var toY: Double?
 
-  // Osascript params
-  public var script: String?
-  public var language: String?
-  public var timeout: Double?
+  // Curated macOS function params
+  public var functionName: String?
+  public var args: [String: JSONValue]?
+  public var name: String?
+  public var description: String?
+  public var rationale: String?
+  public var exampleScript: String?
+
 
   public init(
     mode: String? = nil,
@@ -149,9 +153,12 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     compact: Bool? = nil,
     toX: Double? = nil,
     toY: Double? = nil,
-    script: String? = nil,
-    language: String? = nil,
-    timeout: Double? = nil
+    functionName: String? = nil,
+    args: [String: JSONValue]? = nil,
+    name: String? = nil,
+    description: String? = nil,
+    rationale: String? = nil,
+    exampleScript: String? = nil
   ) {
     self.mode = mode
     self.format = format
@@ -208,9 +215,12 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     self.compact = compact
     self.toX = toX
     self.toY = toY
-    self.script = script
-    self.language = language
-    self.timeout = timeout
+    self.functionName = functionName
+    self.args = args
+    self.name = name
+    self.description = description
+    self.rationale = rationale
+    self.exampleScript = exampleScript
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -269,9 +279,12 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     case compact
     case toX
     case toY
-    case script
-    case language
-    case timeout
+    case functionName
+    case args
+    case name
+    case description
+    case rationale
+    case exampleScript
   }
 
   public init(from decoder: Decoder) throws {
@@ -330,9 +343,12 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     compact = try container.decodeIfPresent(Bool.self, forKey: .compact)
     toX = try container.decodeIfPresent(Double.self, forKey: .toX)
     toY = try container.decodeIfPresent(Double.self, forKey: .toY)
-    script = try container.decodeIfPresent(String.self, forKey: .script)
-    language = try container.decodeIfPresent(String.self, forKey: .language)
-    timeout = try container.decodeIfPresent(Double.self, forKey: .timeout)
+    functionName = try container.decodeIfPresent(String.self, forKey: .functionName)
+    args = try container.decodeIfPresent([String: JSONValue].self, forKey: .args)
+    name = try container.decodeIfPresent(String.self, forKey: .name)
+    description = try container.decodeIfPresent(String.self, forKey: .description)
+    rationale = try container.decodeIfPresent(String.self, forKey: .rationale)
+    exampleScript = try container.decodeIfPresent(String.self, forKey: .exampleScript)
 
     if let numericWindowID = try? container.decodeIfPresent(UInt32.self, forKey: .windowId) {
       windowId = numericWindowID

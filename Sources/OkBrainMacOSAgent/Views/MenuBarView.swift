@@ -12,6 +12,25 @@ struct MenuBarView: View {
       NSApp.activate(ignoringOtherApps: true)
     }
 
+    if !store.pendingAXPermissionRequests.isEmpty {
+      Menu("Pending permission requests (\(store.pendingAXPermissionRequests.count))") {
+        ForEach(store.pendingAXPermissionRequests) { request in
+          Menu("\(request.intent.label) — \(request.target.displayName)") {
+            Button("Allow \(request.intent.label) Once") {
+              store.resolvePendingAXPermissionRequest(id: request.id, resolution: .allowOnce)
+            }
+            Button("Always Allow \(request.intent.label)") {
+              store.resolvePendingAXPermissionRequest(id: request.id, resolution: .allowAlways)
+            }
+            Divider()
+            Button("Dismiss") {
+              store.resolvePendingAXPermissionRequest(id: request.id, resolution: .dismiss)
+            }
+          }
+        }
+      }
+    }
+
     Button("Capture Screenshot") {
       store.captureFullScreenProbe()
       openWindow(id: WindowID.main)

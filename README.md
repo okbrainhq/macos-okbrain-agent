@@ -1,8 +1,8 @@
 # OkBrain macOS Agent
 
-A macOS menu-bar agent that exposes screenshot capture, accessibility (AX) GUI control, AppleScript (`osascript`) execution, and toggleable file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding and exchanges `OKB1` binary frames.
+A macOS menu-bar agent that exposes screenshot capture, accessibility (AX) GUI control with per-app guardrails, a curated macOS function catalog, and toggleable file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding and exchanges `OKB1` binary frames.
 
-See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md), [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md), [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md), and [`protocol/05-macos-agent-osascript-api.md`](protocol/05-macos-agent-osascript-api.md) for the protocol specifications.
+See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md), [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md), [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md), and [`protocol/07-macos-agent-guardrails-and-functions.md`](protocol/07-macos-agent-guardrails-and-functions.md) for the protocol specifications. Raw `osascript.run` was retired and is no longer a protocol capability.
 
 ## Requirements
 
@@ -46,15 +46,17 @@ Both app plists include `AppEnvironment` and `AppStateDirectoryName`. `MACOS_AGE
 
 The agent starts a Unix socket for the selected mode (`/tmp/okbrain-macos-agent-dev.sock` for dev, `/tmp/okbrain-macos-agent.sock` for prod) and listens for `OKB1` binary-framed requests. Screenshots are encoded locally as WebP quality 80 and returned as binary response bodies. By default, it starts a per-process `ProcessInfo` activity with idle system sleep disabled while the agent is active (display sleep is allowed, so the screen can turn off normally), without changing global `pmset` settings or requiring sudo.
 
-## Accessibility (AX) API
+## Accessibility (AX) API and App & Global Access
 
-When Accessibility permission is granted, the agent serves eleven `ax.*` actions for GUI automation: `ax.list-apps`, `ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.perform`, `ax.get-value`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, and `ax.scroll`. Agents target elements with a query (`appName`/`pid` + `role`/`title`/`label`/`identifier`/`valueContains`), so no persistent handles or coordinates are required. See [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md) for the full spec and Brain-side integration guide.
+When Accessibility permission is granted, the agent serves `ax.*` GUI actions for app discovery, inspection, and control. Access is **default-deny**: every app read needs explicit **Observe** or **Control** access, while writes need **Control** (which includes Observe). Every app target is resolved to a bundle ID—or a captured frontmost PID for untargeted synthetic input—then rechecked immediately before control is sent. The local popup asks for the exact level and offers Allow Once, Always Allow Observe/Control, or Not Now; unresolved targets fail closed without prompting or queuing. Manage grants in **File Permissions → App & Global Access**: global capability categories are always in the picker, while installed apps are selected through a native `.app` file browser. Timed-out requests remain in a sanitized, bounded menu-bar pending list for a later decision.
 
-## AppleScript / osascript
+See [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md) and [`protocol/07-macos-agent-guardrails-and-functions.md`](protocol/07-macos-agent-guardrails-and-functions.md) for the full targeting and guardrail rules.
 
-The agent serves one `osascript.run` action for running AppleScript or JXA snippets through `/usr/bin/osascript`. The script is piped over stdin, so multi-line scripts and embedded quotes need no shell escaping and there is no argument-length limit. Params: `script` (required), `language` (`applescript` by default, or `javascript`/`jxa`), and an optional `timeout` in seconds (default 30, max 300). The response returns `language`, `exitCode`, `stdout`, `stderr`, and `timedOut`.
+## Curated macOS Functions
 
-Controlling another app via AppleScript requires macOS **Automation** permission for that target app. To avoid surprise consent prompts mid-task, pre-authorize apps in **Settings → AppleScript App Access**: add apps from your Applications folder, then click **Request Access** to trigger the system prompt up front. Each app shows a live status (Authorized / Denied / Not Requested), read via `AEDeterminePermissionToAutomateTarget`. Denied apps can be re-approved in System Settings → Privacy & Security → Automation.
+The agent serves `functions.list`, `functions.run`, and `functions.propose`. The catalog replaces raw scripting with validated, named operations for apps, system volume/clipboard/battery/Wi-Fi, media, browsers, Finder, notifications, and branded dialogs. Read functions are catalog-enabled by default but still require explicit **Observe** permission for their app or global category. Write functions and elevated `browser.run-javascript` also require their per-function local toggles plus **Control** permission. Global categories—Application Discovery, System Audio, Clipboard, Power & Battery, Network Information, Notifications, and User Dialogs—are managed in the same App & Global Access picker.
+
+Functions that use Apple Events preflight macOS **Automation** permission for their target app. Grant or revoke that permission in System Settings → Privacy & Security → Automation. Proposals appear in the local Functions inbox; approval requires a full-source review and submitted SHA-256 digest. Stored templates bind one reviewed literal app bundle ID, reject dynamic/multi-target and shell/admin/scripting-addition constructs, escape fixed placeholders, and run under bounded output and timeout handling.
 
 ## File Editing
 

@@ -10,6 +10,9 @@ public protocol FileEditingServicing: Sendable {
   func write(_ params: AgentRequestParams) throws -> FileWritePayload
   func patch(_ params: AgentRequestParams) throws -> FilePatchPayload
   func search(_ params: AgentRequestParams) throws -> FileSearchPayload
+  /// Resolves an existing readable target through the same canonical,
+  /// symlink-safe policy used by `fs.*` before a function may reveal it.
+  func resolveExistingReadablePath(_ path: String) throws -> String
 }
 
 public final class LocalFileEditingService: FileEditingServicing, @unchecked Sendable {
@@ -21,6 +24,42 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     self.configuration = configuration
     self.fileManager = fileManager
     permissionEngine = FilePermissionRuleEngine(rules: configuration.allowedRoots)
+  }
+
+  public func resolveExistingReadablePath(_ path: String) throws -> String {
+    guard configuration.enabled else {
+      throw AgentProtocolError.rootNotAllowed("File editing is disabled")
+    }
+
+    // Match the caller's lexical path first. Canonicalizing before this check
+    // would turn a child of an allowed root that traverses an escaping symlink
+    // into an ordinary outside path and lose the security-relevant error.
+    let lexicalPath = try resolveLexicalAbsolutePath(path)
+    guard let lexicalMatch = lexicalPermissionMatch(for: lexicalPath), lexicalMatch.mode.canRead else {
+      throw AgentProtocolError.rootNotAllowed("No permission rule allows read access to: \(lexicalPath)")
+    }
+
+    let relative = relativePath(for: lexicalPath, root: lexicalMatch.lexicalRootPath)
+    try rejectSymlinkComponents(relativePath: relative, rootPath: lexicalMatch.lexicalRootPath)
+    guard lstatInfo(lexicalPath) != nil else {
+      throw AgentProtocolError.fileNotFound("Reveal target does not exist: \(lexicalPath)")
+    }
+
+    // A successful lexical check is not sufficient for dispatch: only return
+    // a realpath that is still inside the initially matched root and remains
+    // readable under the canonical rule engine.
+    guard let canonicalPath = realPath(lexicalPath) else {
+      throw AgentProtocolError.fileNotFound("Reveal target does not exist: \(lexicalPath)")
+    }
+    guard self.path(canonicalPath, isInsideRoot: lexicalMatch.canonicalRootPath) else {
+      throw AgentProtocolError.pathOutsideRoot("Reveal target resolves outside its allowed root")
+    }
+
+    let canonicalDecision = permissionEngine.decision(for: canonicalPath)
+    guard canonicalDecision.canRead else {
+      throw AgentProtocolError.rootNotAllowed("No permission rule allows read access to: \(canonicalPath)")
+    }
+    return canonicalPath
   }
 
   public func describeWorkspace(_ params: AgentRequestParams) throws -> WorkspaceDescribePayload {
@@ -433,6 +472,13 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
   }
 
   private func resolveAbsolute(_ rawPath: String?, defaultPath: String?) throws -> String {
+    canonicalPath(try resolveLexicalAbsolutePath(rawPath, defaultPath: defaultPath))
+  }
+
+  /// Standardizes `.` and `..` without following symlinks. It is used only
+  /// when the lexical location itself affects authorization or error
+  /// classification; regular fs actions continue through `resolveAbsolute`.
+  private func resolveLexicalAbsolutePath(_ rawPath: String?, defaultPath: String? = nil) throws -> String {
     guard let raw = (rawPath ?? defaultPath)?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
       throw AgentProtocolError.invalidRequest("File action requires path")
     }
@@ -440,7 +486,38 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     guard (expanded as NSString).isAbsolutePath else {
       throw AgentProtocolError.invalidRequest("Path must be absolute")
     }
-    return canonicalPath(expanded)
+    return URL(fileURLWithPath: expanded).standardizedFileURL.path
+  }
+
+  /// Reproduces the rule engine's longest-prefix selection using a lexical
+  /// target path. Keep both spellings of the root: macOS system aliases such
+  /// as `/var` may canonicalize to `/private/var`, while user-controlled child
+  /// symlinks must remain visible until they are explicitly rejected.
+  private func lexicalPermissionMatch(for lexicalPath: String) -> LexicalPermissionMatch? {
+    var match: (value: LexicalPermissionMatch, order: Int)?
+
+    for (order, rule) in configuration.allowedRoots.enumerated() {
+      guard let lexicalRootPath = try? resolveLexicalAbsolutePath(rule.path),
+            let canonicalRootPath = try? FilePermissionRuleEngine.normalizedRulePath(rule.path),
+            self.path(lexicalPath, isInsideRoot: lexicalRootPath) else {
+        continue
+      }
+      let candidate = LexicalPermissionMatch(
+        lexicalRootPath: lexicalRootPath,
+        canonicalRootPath: canonicalRootPath,
+        mode: rule.mode
+      )
+      guard let current = match else {
+        match = (candidate, order)
+        continue
+      }
+      if candidate.lexicalRootPath.count > current.value.lexicalRootPath.count
+        || (candidate.lexicalRootPath.count == current.value.lexicalRootPath.count && order > current.order) {
+        match = (candidate, order)
+      }
+    }
+
+    return match?.value
   }
 
   private func resolve(_ params: AgentRequestParams, defaultPath: String?) throws -> ResolvedPath {
@@ -522,10 +599,10 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
     var current = URL(fileURLWithPath: rootPath, isDirectory: true)
     for component in components {
       current.appendPathComponent(component)
-      guard fileManager.fileExists(atPath: current.path) else {
+      guard let info = lstatInfo(current.path) else {
         break
       }
-      if isSymlink(current.path) {
+      if fileType(info) == "symlink" {
         throw AgentProtocolError.pathOutsideRoot("Symlink paths are not followed by default")
       }
     }
@@ -726,7 +803,7 @@ public final class LocalFileEditingService: FileEditingServicing, @unchecked Sen
   }
 
   private func path(_ path: String, isInsideRoot root: String) -> Bool {
-    path == root || path.hasPrefix(root + "/")
+    root == "/" || path == root || path.hasPrefix(root + "/")
   }
 
   private func relativePath(for path: String, root: String) -> String {
@@ -834,6 +911,12 @@ private struct ResolvedPath {
   let rootPath: String
   let relativePath: String
   let url: URL
+  let mode: FileEditingMode
+}
+
+private struct LexicalPermissionMatch {
+  let lexicalRootPath: String
+  let canonicalRootPath: String
   let mode: FileEditingMode
 }
 

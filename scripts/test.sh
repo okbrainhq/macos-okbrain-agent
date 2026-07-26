@@ -31,6 +31,10 @@ section() {
 section "Swift package build"
 swift build "${SWIFTPM_FLAGS[@]}" >/dev/null
 
+section "Swift executable tests"
+"$ROOT_DIR/.build/debug/PermissionRuleEngineTests"
+"$ROOT_DIR/.build/debug/DisplayWakeTests"
+
 section "Protocol verifier"
 VERIFY_DIR="$ROOT_DIR/.build/verify"
 VERIFY_BINARY="$VERIFY_DIR/verify_protocol"
@@ -67,6 +71,7 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$DEV_INFO_PLIST"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$DEV_INFO_PLIST")" = "OkBrainMacOSAgent-Dev"
 test "$(/usr/libexec/PlistBuddy -c 'Print :AppEnvironment' "$DEV_INFO_PLIST")" = "dev"
 test "$(/usr/libexec/PlistBuddy -c 'Print :AppStateDirectoryName' "$DEV_INFO_PLIST")" = ".okbrain-macos-agent-dev"
+test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$DEV_INFO_PLIST")"
 
 test -d "$PROD_APP_BUNDLE"
 test -x "$PROD_APP_BINARY"
@@ -78,5 +83,6 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PROD_INFO_PLIST
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PROD_INFO_PLIST")" = "2.0.0"
 test "$(/usr/libexec/PlistBuddy -c 'Print :AppEnvironment' "$PROD_INFO_PLIST")" = "prod"
 test "$(/usr/libexec/PlistBuddy -c 'Print :AppStateDirectoryName' "$PROD_INFO_PLIST")" = ".okbrain-macos-agent"
+test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$PROD_INFO_PLIST")"
 
 echo "Tests passed"

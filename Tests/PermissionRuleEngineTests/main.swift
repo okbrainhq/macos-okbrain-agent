@@ -15,6 +15,7 @@ enum PermissionRuleEngineTests {
     try serviceAllowsReadsAndDeniesWritesForReadRule()
     try serviceAllowsNestedWriteOverride()
     try serviceDeniesWriteWhenNestedReadOverridesParentWrite()
+    try revealPathResolutionRejectsSymlinksAndPreservesErrorClassification()
     try statusDoesNotExposePermissionRules()
     try fsListNonRecursiveReturnsBasenameForNameAndPath()
     try fsListRecursiveReturnsRelativePathForNameAndPath()
@@ -226,6 +227,46 @@ enum PermissionRuleEngineTests {
 
     try expectProtocolError("permission_denied") {
       _ = try service.write(AgentRequestParams(path: projectPath + "/Locked/ReadOnly.txt", content: "updated"))
+    }
+  }
+
+  private static func revealPathResolutionRejectsSymlinksAndPreservesErrorClassification() throws {
+    let fixture = try TemporaryDirectory()
+    defer { fixture.remove() }
+    let allowed = try fixture.makeDirectory("Allowed")
+    let outside = try fixture.makeDirectory("Outside")
+    let safeFile = allowed.appendingPathComponent("safe.txt")
+    let outsideFile = outside.appendingPathComponent("outside.txt")
+    try "safe".write(to: safeFile, atomically: true, encoding: .utf8)
+    try "outside".write(to: outsideFile, atomically: true, encoding: .utf8)
+
+    let service = LocalFileEditingService(configuration: FileEditingConfiguration(
+      enabled: true,
+      mode: .readWrite,
+      allowedRoots: [FileEditingAllowedRoot(path: allowed.path, mode: .readOnly)]
+    ))
+
+    let canonicalSafePath = try service.resolveExistingReadablePath(safeFile.path)
+    let expectedSafePath = try FilePermissionRuleEngine.normalizedRulePath(safeFile.path)
+    try expect(canonicalSafePath == expectedSafePath, "Expected reveal to return the canonical allowed path")
+
+    try expectProtocolError("root_not_allowed") {
+      _ = try service.resolveExistingReadablePath(outsideFile.path)
+    }
+    try expectProtocolError("file_not_found") {
+      _ = try service.resolveExistingReadablePath(allowed.appendingPathComponent("missing.txt").path)
+    }
+
+    let finalLink = allowed.appendingPathComponent("final-link")
+    try FileManager.default.createSymbolicLink(at: finalLink, withDestinationURL: safeFile)
+    try expectProtocolError("path_outside_root") {
+      _ = try service.resolveExistingReadablePath(finalLink.path)
+    }
+
+    let escapingLink = allowed.appendingPathComponent("escape", isDirectory: true)
+    try FileManager.default.createSymbolicLink(at: escapingLink, withDestinationURL: outside)
+    try expectProtocolError("path_outside_root") {
+      _ = try service.resolveExistingReadablePath(escapingLink.appendingPathComponent("missing.txt").path)
     }
   }
 

@@ -4,13 +4,25 @@ public protocol ScreenshotCapturing: Sendable {
   func capture(_ params: AgentRequestParams) throws -> CapturedImage
 }
 
+/// Captures the exact authorization target selected before AX dispatch. Global
+/// AX actions use a category target; app actions retain the resolved PID for a
+/// final identity check before control is sent.
+private struct AXActionAuthorization {
+  let targetResolution: AXResolvedTarget?
+  let permissionTarget: PermissionTarget
+}
+
 public final class AgentRequestHandler: @unchecked Sendable {
   private let configuration: AgentConfiguration
   private let permissions: PermissionChecking
   private let screenshots: ScreenshotCapturing
   private let fileEditing: FileEditingServicing
   private let accessibility: AccessibilityServicing
-  private let osascript: OsascriptServicing
+  private let functionRegistry: FunctionRegistry
+  private let functionState: FunctionRuntimeState
+  private let automationPermissions: AutomationPermissionServicing
+  private let axPermissionCoordinator: AXPermissionCoordinator
+  private let axTargetResolver: AXTargetResolving
   private let remoteControlEnabled: @Sendable () -> Bool
   private let makeDisplayWake: @Sendable (TimeInterval) -> (any DisplayWaking)?
 
@@ -46,8 +58,20 @@ public final class AgentRequestHandler: @unchecked Sendable {
     "ax.drag"
   ]
 
-  private let osascriptActions: Set<String> = [
-    "osascript.run"
+  private let accessibilityWriteActions: Set<String> = [
+    "ax.perform",
+    "ax.set-value",
+    "ax.type-text",
+    "ax.key-press",
+    "ax.click-at",
+    "ax.scroll",
+    "ax.drag"
+  ]
+
+  private let functionActions: Set<String> = [
+    "functions.list",
+    "functions.run",
+    "functions.propose"
   ]
 
   public init(
@@ -56,7 +80,11 @@ public final class AgentRequestHandler: @unchecked Sendable {
     screenshots: ScreenshotCapturing = ScreenCaptureKitScreenshotService(),
     fileEditing: FileEditingServicing? = nil,
     accessibility: AccessibilityServicing = SystemAccessibilityService(),
-    osascript: OsascriptServicing = SystemOsascriptService(),
+    functionRegistry: FunctionRegistry? = nil,
+    functionState: FunctionRuntimeState? = nil,
+    automationPermissions: AutomationPermissionServicing = SystemAutomationPermissionService(),
+    axPermissionCoordinator: AXPermissionCoordinator? = nil,
+    axTargetResolver: AXTargetResolving = SystemAXTargetResolver(),
     remoteControlEnabled: (@Sendable () -> Bool)? = nil,
     displayWakeFactory: (@Sendable (TimeInterval) -> (any DisplayWaking)?)? = nil
   ) {
@@ -65,7 +93,11 @@ public final class AgentRequestHandler: @unchecked Sendable {
     self.screenshots = screenshots
     self.fileEditing = fileEditing ?? LocalFileEditingService(configuration: configuration.fileEditing)
     self.accessibility = accessibility
-    self.osascript = osascript
+    self.functionRegistry = functionRegistry ?? FunctionRegistry.standard()
+    self.functionState = functionState ?? FunctionRuntimeState()
+    self.automationPermissions = automationPermissions
+    self.axPermissionCoordinator = axPermissionCoordinator ?? AXPermissionCoordinator()
+    self.axTargetResolver = axTargetResolver
     self.remoteControlEnabled = remoteControlEnabled ?? { true }
     self.makeDisplayWake = displayWakeFactory ?? { settleDelay in DisplayWakeGuard(settleDelay: settleDelay) }
   }
@@ -88,8 +120,11 @@ public final class AgentRequestHandler: @unchecked Sendable {
         throw AgentProtocolError.invalidRequest("Request action is required")
       }
 
-      guard envelopeActions.contains(action) || fileActions.contains(action) || accessibilityActions.contains(action) || osascriptActions.contains(action) else {
-        throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
+      guard envelopeActions.contains(action)
+              || fileActions.contains(action)
+              || accessibilityActions.contains(action)
+              || functionActions.contains(action) else {
+        throw AgentProtocolError.unknownAction("Unknown action: \(action)")
       }
 
       guard let protocolName = request.protocolName,
@@ -98,18 +133,14 @@ public final class AgentRequestHandler: @unchecked Sendable {
       }
       responseProtocol = protocolName
 
-      // Single kill-switch for every remote-control surface: Accessibility
-      // (ax.*) and AppleScript (osascript.run).
-      if (accessibilityActions.contains(action) || osascriptActions.contains(action)), !remoteControlEnabled() {
-        throw AgentProtocolError.invalidRequest("Remote control APIs (Accessibility ax.* and AppleScript osascript.run) are disabled in the agent's settings")
+      // The global toggle disables all remote actions that execute a function
+      // or drive UI, while discovery and proposal inbox operations remain safe.
+      if accessibilityActions.contains(action) || action == "functions.run" {
+        try requireRemoteControlEnabled()
       }
 
-      // Wake the display for accessibility and AppleScript commands so AX
-      // queries, synthetic input events, and osascript-driven UI automation
-      // work even when the display has gone to sleep.
-      // No-op (no delay) when the display is already awake.
       var displayWake: (any DisplayWaking)?
-      if accessibilityActions.contains(action) || osascriptActions.contains(action) {
+      if accessibilityActions.contains(action) || action == "functions.run" {
         displayWake = makeDisplayWake(0.5)
       }
       defer { displayWake?.release() }
@@ -128,176 +159,50 @@ public final class AgentRequestHandler: @unchecked Sendable {
           params: request.params ?? AgentRequestParams(mode: "full", format: "webp", quality: 80)
         )
       case "workspace.describe":
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: fileEditing.describeWorkspace(request.params ?? AgentRequestParams())
-        )
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: fileEditing.describeWorkspace(request.params ?? AgentRequestParams()))
       case "fs.stat":
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: fileEditing.stat(request.params ?? AgentRequestParams())
-        )
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: fileEditing.stat(request.params ?? AgentRequestParams()))
       case "fs.list":
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: fileEditing.list(request.params ?? AgentRequestParams())
-        )
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: fileEditing.list(request.params ?? AgentRequestParams()))
       case "fs.read":
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: fileEditing.read(request.params ?? AgentRequestParams())
-        )
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: fileEditing.read(request.params ?? AgentRequestParams()))
       case "fs.write":
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: fileEditing.write(request.params ?? AgentRequestParams())
-        )
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: fileEditing.write(request.params ?? AgentRequestParams()))
       case "fs.patch":
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: fileEditing.patch(request.params ?? AgentRequestParams())
-        )
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: fileEditing.patch(request.params ?? AgentRequestParams()))
       case "fs.search":
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: fileEditing.search(request.params ?? AgentRequestParams()))
+      case "functions.list":
         return try encodeSuccess(
           protocolName: responseProtocol,
           id: requestID,
-          data: fileEditing.search(request.params ?? AgentRequestParams())
+          data: functionRegistry.catalog(state: functionState, automation: automationPermissions)
         )
-      case "ax.list-apps":
-        try requireAccessibility()
-        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: accessibility.listApps())
-      case "ax.list-windows":
-        try requireAccessibility()
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: accessibility.listWindows(query: axQuery(request.params))
-        )
-      case "ax.get-tree":
-        try requireAccessibility()
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: accessibility.tree(query: axQuery(request.params))
-        )
-      case "ax.find":
-        try requireAccessibility()
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: accessibility.find(query: axQuery(request.params, defaultDepth: 30), limit: request.params?.maxResults ?? 20)
-        )
-      case "ax.perform":
-        try requireAccessibility()
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: accessibility.perform(query: axQuery(request.params, defaultDepth: 30), action: request.params?.action ?? "press")
-        )
-      case "ax.get-value":
-        try requireAccessibility()
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: accessibility.value(query: axQuery(request.params, defaultDepth: 30))
-        )
-      case "ax.set-value":
-        try requireAccessibility()
-        guard let value = request.params?.value else {
-          throw AgentProtocolError.invalidRequest("value is required for ax.set-value")
+      case "functions.propose":
+        let params = request.params ?? AgentRequestParams()
+        guard let name = params.name, let description = params.description, let rationale = params.rationale else {
+          throw invalidArgsError("Proposal validation failed", violations: [
+            .init(argument: "name", reason: "name is required."),
+            .init(argument: "description", reason: "description is required."),
+            .init(argument: "rationale", reason: "rationale is required.")
+          ])
         }
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: accessibility.setValue(query: axQuery(request.params, defaultDepth: 30), value: value)
-        )
-      case "ax.type-text":
-        try requireAccessibility()
-        guard let text = request.params?.text, !text.isEmpty else {
-          throw AgentProtocolError.invalidRequest("text is required for ax.type-text")
+        if functionRegistry.function(named: name, state: functionState) != nil {
+          throw invalidArgsError("Proposal validation failed", violations: [
+            .init(argument: "name", reason: "A built-in or approved function already uses this name.")
+          ])
         }
-        try accessibility.typeText(text, targetPid: request.params?.targetPid)
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: AXSimpleResultPayload(action: "ax.type-text", detail: "Typed \(text.count) characters")
+        let proposal = try functionState.submitProposal(
+          name: name,
+          description: description,
+          rationale: rationale,
+          exampleScript: params.exampleScript
         )
-      case "ax.key-press":
-        try requireAccessibility()
-        guard let key = request.params?.key, !key.isEmpty else {
-          throw AgentProtocolError.invalidRequest("key is required for ax.key-press")
-        }
-        try accessibility.keyPress(key: key, modifiers: request.params?.modifiers ?? [], targetPid: request.params?.targetPid)
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: AXSimpleResultPayload(
-            action: "ax.key-press",
-            detail: "Pressed \((request.params?.modifiers ?? []).joined(separator: "+"))\(request.params?.modifiers?.isEmpty == false ? "+" : "")\(key)"
-          )
-        )
-      case "ax.click-at":
-        try requireAccessibility()
-        guard let x = request.params?.x, let y = request.params?.y else {
-          throw AgentProtocolError.invalidRequest("x and y are required for ax.click-at")
-        }
-        try accessibility.clickAt(x: x, y: y, button: request.params?.button ?? "left", clickCount: request.params?.clickCount ?? 1, targetPid: request.params?.targetPid)
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: AXSimpleResultPayload(action: "ax.click-at", detail: "Clicked at (\(x), \(y))")
-        )
-      case "ax.scroll":
-        try requireAccessibility()
-        try accessibility.scroll(
-          query: axQuery(request.params, defaultDepth: 30),
-          deltaX: request.params?.deltaX ?? 0,
-          deltaY: request.params?.deltaY ?? 0,
-          x: request.params?.x,
-          y: request.params?.y,
-          targetPid: request.params?.targetPid
-        )
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: AXSimpleResultPayload(
-            action: "ax.scroll",
-            detail: "Scrolled by (\(request.params?.deltaX ?? 0), \(request.params?.deltaY ?? 0))"
-          )
-        )
-      case "ax.drag":
-        try requireAccessibility()
-        guard let x = request.params?.x, let y = request.params?.y,
-              let toX = request.params?.toX, let toY = request.params?.toY else {
-          throw AgentProtocolError.invalidRequest("x, y, toX, and toY are required for ax.drag")
-        }
-        try accessibility.drag(fromX: x, fromY: y, toX: toX, toY: toY, targetPid: request.params?.targetPid)
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: AXSimpleResultPayload(action: "ax.drag", detail: "Dragged from (\(x), \(y)) to (\(toX), \(toY))")
-        )
-      case "osascript.run":
-        guard let script = request.params?.script, !script.isEmpty else {
-          throw AgentProtocolError.invalidRequest("script is required for osascript.run")
-        }
-        return try encodeSuccess(
-          protocolName: responseProtocol,
-          id: requestID,
-          data: osascript.run(
-            script: script,
-            language: request.params?.language ?? "applescript",
-            timeout: request.params?.timeout ?? 0
-          )
-        )
+        return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: FunctionProposalPayload(proposal: proposal))
+      case "functions.run":
+        return try runFunction(protocolName: responseProtocol, id: requestID, params: request.params ?? AgentRequestParams())
       default:
-        throw AgentProtocolError.unsupportedAction("Unsupported action: \(action)")
+        return try dispatchAccessibility(action: action, protocolName: responseProtocol, id: requestID, params: request.params ?? AgentRequestParams())
       }
     } catch let error as AgentProtocolError {
       return errorResponseData(protocolName: responseProtocol, id: responseID, error: error)
@@ -314,19 +219,304 @@ public final class AgentRequestHandler: @unchecked Sendable {
     errorResponseData(protocolName: AgentConfiguration.protocolName, id: id, error: error)
   }
 
-  private func errorResponseData(protocolName: String, id: String, error: AgentProtocolError) -> Data {
-    do {
-      let headerData = try JSONEncoder().encode(ErrorEnvelope(
+  private func dispatchAccessibility(
+    action: String,
+    protocolName: String,
+    id: String,
+    params: AgentRequestParams
+  ) throws -> Data {
+    try requireAccessibility()
+    let authorization = try guardAccessibilityAction(action: action, params: params)
+    let targetResolution = authorization.targetResolution
+    let query = axQuery(params, resolvedTarget: targetResolution)
+    let targetPID = targetResolution?.pid ?? params.targetPid
+    let ensureDispatchAuthorized: () throws -> Void = {
+      try self.finalizeAccessibilityAuthorization(action: action, authorization: authorization)
+    }
+
+    switch action {
+    case "ax.list-apps":
+      try ensureDispatchAuthorized()
+      // Application Discovery is its own explicit global Observe grant. It is
+      // not an implicit per-app exemption and therefore returns the list only
+      // after the local user approves that category.
+      return try encodeSuccess(protocolName: protocolName, id: id, data: accessibility.listApps())
+    case "ax.list-windows":
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(protocolName: protocolName, id: id, data: accessibility.listWindows(query: query))
+    case "ax.get-tree":
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(protocolName: protocolName, id: id, data: accessibility.tree(query: query))
+    case "ax.find":
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(protocolName: protocolName, id: id, data: accessibility.find(query: axQuery(params, defaultDepth: 30, resolvedTarget: targetResolution), limit: params.maxResults ?? 20))
+    case "ax.perform":
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(
         protocolName: protocolName,
         id: id,
-        error: ErrorPayload(code: error.code, message: error.message)
-      ))
-      return try AgentBinaryFrame.encode(headerData: headerData)
-    } catch {
-      let fallback = "{\"protocol\":\"\(protocolName)\",\"id\":\"unknown\",\"ok\":false,\"error\":{\"code\":\"encode_failed\",\"message\":\"Unable to encode response\"}}"
-      let headerData = Data(fallback.utf8)
-      return (try? AgentBinaryFrame.encode(headerData: headerData)) ?? headerData
+        data: accessibility.perform(query: axQuery(params, defaultDepth: 30, resolvedTarget: targetResolution), action: params.action ?? "press")
+      )
+    case "ax.get-value":
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(protocolName: protocolName, id: id, data: accessibility.value(query: axQuery(params, defaultDepth: 30, resolvedTarget: targetResolution)))
+    case "ax.set-value":
+      guard let value = params.value else {
+        throw AgentProtocolError.invalidRequest("value is required for ax.set-value")
+      }
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(
+        protocolName: protocolName,
+        id: id,
+        data: accessibility.setValue(query: axQuery(params, defaultDepth: 30, resolvedTarget: targetResolution), value: value)
+      )
+    case "ax.type-text":
+      guard let text = params.text, !text.isEmpty else {
+        throw AgentProtocolError.invalidRequest("text is required for ax.type-text")
+      }
+      try ensureDispatchAuthorized()
+      try accessibility.typeText(text, targetPid: targetPID)
+      return try encodeSuccess(protocolName: protocolName, id: id, data: AXSimpleResultPayload(action: "ax.type-text", detail: "Typed \(text.count) characters"))
+    case "ax.key-press":
+      guard let key = params.key, !key.isEmpty else {
+        throw AgentProtocolError.invalidRequest("key is required for ax.key-press")
+      }
+      try ensureDispatchAuthorized()
+      try accessibility.keyPress(key: key, modifiers: params.modifiers ?? [], targetPid: targetPID)
+      let modifierText = params.modifiers?.isEmpty == false ? "\((params.modifiers ?? []).joined(separator: "+"))+" : ""
+      return try encodeSuccess(protocolName: protocolName, id: id, data: AXSimpleResultPayload(action: "ax.key-press", detail: "Pressed \(modifierText)\(key)"))
+    case "ax.click-at":
+      guard let x = params.x, let y = params.y else {
+        throw AgentProtocolError.invalidRequest("x and y are required for ax.click-at")
+      }
+      try ensureDispatchAuthorized()
+      try accessibility.clickAt(x: x, y: y, button: params.button ?? "left", clickCount: params.clickCount ?? 1, targetPid: targetPID)
+      return try encodeSuccess(protocolName: protocolName, id: id, data: AXSimpleResultPayload(action: "ax.click-at", detail: "Clicked at (\(x), \(y))"))
+    case "ax.scroll":
+      try ensureDispatchAuthorized()
+      try accessibility.scroll(
+        query: axQuery(params, defaultDepth: 30, resolvedTarget: targetResolution),
+        deltaX: params.deltaX ?? 0,
+        deltaY: params.deltaY ?? 0,
+        x: params.x,
+        y: params.y,
+        targetPid: targetPID
+      )
+      return try encodeSuccess(
+        protocolName: protocolName,
+        id: id,
+        data: AXSimpleResultPayload(action: "ax.scroll", detail: "Scrolled by (\(params.deltaX ?? 0), \(params.deltaY ?? 0))")
+      )
+    case "ax.drag":
+      guard let x = params.x, let y = params.y, let toX = params.toX, let toY = params.toY else {
+        throw AgentProtocolError.invalidRequest("x, y, toX, and toY are required for ax.drag")
+      }
+      try ensureDispatchAuthorized()
+      try accessibility.drag(fromX: x, fromY: y, toX: toX, toY: toY, targetPid: targetPID)
+      return try encodeSuccess(protocolName: protocolName, id: id, data: AXSimpleResultPayload(action: "ax.drag", detail: "Dragged from (\(x), \(y)) to (\(toX), \(toY))"))
+    default:
+      throw AgentProtocolError.unknownAction("Unknown action: \(action)")
     }
+  }
+
+  private func guardAccessibilityAction(action: String, params: AgentRequestParams) throws -> AXActionAuthorization {
+    // Listing applications is a global discovery capability, not an implicit
+    // observation exemption for every installed/running app.
+    if action == "ax.list-apps" {
+      let target = GlobalPermissionCategory.applicationDiscovery.permissionTarget
+      try axPermissionCoordinator.authorizeObservation(
+        target: target,
+        action: action,
+        context: "Requested through the Accessibility API."
+      )
+      return AXActionAuthorization(targetResolution: nil, permissionTarget: target)
+    }
+
+    let isWrite = accessibilityWriteActions.contains(action)
+    let resolved = try axTargetResolver.resolve(params: params, useFrontmostFallback: isWrite)
+    guard resolved.wasResolved, resolved.target.isValidated else {
+      throw unresolvedAccessibilityTargetError(action: action, intent: isWrite ? .control : .observe)
+    }
+
+    if isWrite {
+      try axPermissionCoordinator.authorizeControl(
+        target: resolved.target,
+        action: action,
+        context: "Requested through the Accessibility API."
+      )
+    } else {
+      try axPermissionCoordinator.authorizeObservation(
+        target: resolved.target,
+        action: action,
+        context: "Requested through the Accessibility API."
+      )
+    }
+    return AXActionAuthorization(targetResolution: resolved, permissionTarget: resolved.target)
+  }
+
+  /// Performs a no-prompt, fail-closed authorization check at the last safe
+  /// point before an AX call. Any UI prompt or frontmost-app delay happened
+  /// earlier, so rules/global controls/PID identity must be evaluated again.
+  private func finalizeAccessibilityAuthorization(
+    action: String,
+    authorization: AXActionAuthorization
+  ) throws {
+    try requireRemoteControlEnabled()
+
+    if accessibilityWriteActions.contains(action) {
+      guard let targetResolution = authorization.targetResolution,
+            axTargetResolver.isStillCurrent(targetResolution) else {
+        throw unresolvedAccessibilityTargetError(action: action, intent: .control)
+      }
+      try axPermissionCoordinator.recheckControlWithoutPrompt(
+        target: authorization.permissionTarget,
+        action: action
+      )
+    } else {
+      try axPermissionCoordinator.recheckObservationWithoutPrompt(
+        target: authorization.permissionTarget,
+        action: action
+      )
+    }
+  }
+
+  private func unresolvedAccessibilityTargetError(action: String, intent: AXPermissionIntent) -> AgentProtocolError {
+    AgentProtocolError.appPermissionRequired(
+      "The Accessibility target could not be resolved safely.",
+      details: .object([
+        "targetKind": .string(PermissionTargetKind.application.rawValue),
+        "targetID": .string(""),
+        "targetName": .string("Unknown app"),
+        "intent": .string(intent.rawValue),
+        "action": .string(action),
+        "pending": .bool(false)
+      ])
+    )
+  }
+
+  private func runFunction(protocolName: String, id: String, params: AgentRequestParams) throws -> Data {
+    let rawName = (params.functionName ?? params.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !rawName.isEmpty else {
+      throw invalidArgsError("Function argument validation failed", violations: [
+        .init(argument: "name", reason: "Function name is required.")
+      ])
+    }
+    guard let function = functionRegistry.function(named: rawName, state: functionState) else {
+      throw AgentProtocolError.unknownFunction("Unknown function: \(rawName)")
+    }
+    guard functionState.isEnabled(function.name, tier: function.tier) else {
+      throw AgentProtocolError.functionDisabled("Function '\(function.name)' is disabled. Enable it in the local OkBrain Agent settings.")
+    }
+    let executionIdentity = function.executionIdentity
+
+    do {
+      let plan = try function.makeExecutionPlan(args: params.args ?? [:])
+      let permissionTarget = try validatedPermissionTarget(for: plan, functionName: function.name)
+      var dispatchPlan = plan
+      let permissionAction = "functions.run → \(function.name)"
+      let intent: AXPermissionIntent = function.tier == .read ? .observe : .control
+      if intent == .observe {
+        try axPermissionCoordinator.authorizeObservation(
+          target: permissionTarget,
+          action: permissionAction,
+          context: "Requested by the curated macOS function catalog."
+        )
+      } else {
+        try axPermissionCoordinator.authorizeControl(
+          target: permissionTarget,
+          action: permissionAction,
+          context: "Requested by the curated macOS function catalog."
+        )
+      }
+      if let target = plan.target, target.requiresAutomation {
+        try requireAutomationAccess(target)
+      }
+      if let fileRequirement = plan.fileAccessRequirement {
+        dispatchPlan = plan.withResolvedFilePath(try resolveFunctionFileAccess(fileRequirement))
+      }
+
+      // Prompts and TCC preflight may have waited seconds. Recheck every mutable
+      // gate immediately before a catalog backend performs the operation.
+      try requireRemoteControlEnabled()
+      guard functionState.isEnabled(function.name, tier: function.tier),
+            functionRegistry.isCurrent(executionIdentity, state: functionState) else {
+        throw AgentProtocolError.functionDisabled("Function '\(function.name)' was disabled, removed, or replaced before it could run.")
+      }
+      if intent == .observe {
+        try axPermissionCoordinator.recheckObservationWithoutPrompt(target: permissionTarget, action: permissionAction)
+      } else {
+        try axPermissionCoordinator.recheckControlWithoutPrompt(target: permissionTarget, action: permissionAction)
+      }
+
+      let context = FunctionExecutionContext(canObserveApp: { [axPermissionCoordinator] target in
+        axPermissionCoordinator.allowsObservation(of: target)
+      })
+      let result = try function.run(plan: dispatchPlan, context: context)
+      try FunctionOutputLimits.validate(result)
+      return try encodeSuccess(protocolName: protocolName, id: id, data: FunctionRunPayload(name: function.name, result: result))
+    } catch let error as AgentProtocolError {
+      throw error
+    } catch {
+      throw AgentProtocolError.functionFailed(
+        "Function '\(function.name)' failed: \(error.localizedDescription)",
+        details: .object("function", .string(function.name))
+      )
+    }
+  }
+
+  /// A function plan must bind its authorization to the resource it will use.
+  /// App-backed plans cannot borrow a global category (or another app's grant),
+  /// and genuinely global plans cannot borrow an arbitrary app rule.
+  private func validatedPermissionTarget(
+    for plan: FunctionExecutionPlan,
+    functionName: String
+  ) throws -> PermissionTarget {
+    guard let permissionTarget = plan.permissionTarget, permissionTarget.isValidated else {
+      throw AgentProtocolError.functionFailed(
+        "Function '\(functionName)' did not declare a valid permission target.",
+        details: .object("function", .string(functionName))
+      )
+    }
+
+    if let target = plan.target {
+      guard permissionTarget == target.permissionTarget else {
+        throw AgentProtocolError.functionFailed(
+          "Function '\(functionName)' declared a permission target that does not match its application target.",
+          details: .object(
+            "function", .string(functionName),
+            "expectedTargetID", .string(target.permissionTarget.id),
+            "declaredTargetID", .string(permissionTarget.id)
+          )
+        )
+      }
+    } else if permissionTarget.kind != .category {
+      throw AgentProtocolError.functionFailed(
+        "Function '\(functionName)' must use an allow-listed global category when it has no application target.",
+        details: .object("function", .string(functionName), "declaredTargetID", .string(permissionTarget.id))
+      )
+    }
+
+    return permissionTarget
+  }
+
+  private func requireAutomationAccess(_ target: FunctionTarget) throws {
+    var status = automationPermissions.status(forBundleID: target.bundleID)
+    if status == .notDetermined {
+      status = automationPermissions.requestAccess(forBundleID: target.bundleID)
+    }
+    guard status == .authorized else {
+      throw AgentProtocolError.automationPermissionRequired(
+        "Automation access to \(target.appName) is required. Grant it in System Settings → Privacy & Security → Automation.",
+        details: .object("bundleID", .string(target.bundleID), "status", .string(status.rawValue))
+      )
+    }
+  }
+
+  private func resolveFunctionFileAccess(_ requirement: FunctionFileAccessRequirement) throws -> String {
+    guard requirement.intent == .read else {
+      throw AgentProtocolError.permissionDenied("Curated functions may only request read access through the file permission service")
+    }
+    return try fileEditing.resolveExistingReadablePath(requirement.path)
   }
 
   private func capture(protocolName: String, id: String, params: AgentRequestParams) throws -> Data {
@@ -354,23 +544,33 @@ public final class AgentRequestHandler: @unchecked Sendable {
     }
   }
 
-  private func axQuery(_ params: AgentRequestParams?, defaultDepth: Int = 10) -> AXElementQuery {
+  private func requireRemoteControlEnabled() throws {
+    guard remoteControlEnabled() else {
+      throw AgentProtocolError.invalidRequest("Remote control APIs (Accessibility ax.* and curated functions.run) are disabled in the agent's settings")
+    }
+  }
+
+  private func axQuery(
+    _ params: AgentRequestParams,
+    defaultDepth: Int = 10,
+    resolvedTarget: AXResolvedTarget? = nil
+  ) -> AXElementQuery {
     AXElementQuery(
-      appName: params?.appName,
-      pid: params?.pid,
-      windowTitle: params?.windowTitle,
-      windowIndex: params?.windowIndex,
-      role: params?.role,
-      title: params?.title,
-      label: params?.label,
-      identifier: params?.identifier,
-      valueContains: params?.valueContains,
-      index: params?.index ?? 0,
-      maxDepth: params?.depth ?? defaultDepth,
-      maxElements: params?.maxElements ?? 500,
-      allWindows: params?.allWindows ?? false,
-      scope: params?.scope,
-      compact: params?.compact ?? false
+      appName: params.appName,
+      pid: resolvedTarget?.pid ?? params.pid,
+      windowTitle: params.windowTitle,
+      windowIndex: params.windowIndex,
+      role: params.role,
+      title: params.title,
+      label: params.label,
+      identifier: params.identifier,
+      valueContains: params.valueContains,
+      index: params.index ?? 0,
+      maxDepth: params.depth ?? defaultDepth,
+      maxElements: params.maxElements ?? 500,
+      allWindows: params.allWindows ?? false,
+      scope: params.scope,
+      compact: params.compact ?? false
     )
   }
 
@@ -383,7 +583,9 @@ public final class AgentRequestHandler: @unchecked Sendable {
       "screenshot.cursor",
       "screenshot.webp",
       "screenshot.binary",
-      "osascript.run"
+      "functions.list",
+      "functions.run",
+      "functions.propose"
     ]
 
     if configuration.fileEditing.enabled {
@@ -461,12 +663,23 @@ public final class AgentRequestHandler: @unchecked Sendable {
     data: T,
     bodyData: Data = Data()
   ) throws -> Data {
-    let headerData = try JSONEncoder().encode(SuccessEnvelope(
-      protocolName: protocolName,
-      id: id,
-      data: data
-    ))
+    let headerData = try JSONEncoder().encode(SuccessEnvelope(protocolName: protocolName, id: id, data: data))
     return try AgentBinaryFrame.encode(headerData: headerData, bodyData: bodyData)
+  }
+
+  private func errorResponseData(protocolName: String, id: String, error: AgentProtocolError) -> Data {
+    do {
+      let headerData = try JSONEncoder().encode(ErrorEnvelope(
+        protocolName: protocolName,
+        id: id,
+        error: ErrorPayload(code: error.code, message: error.message, details: error.details)
+      ))
+      return try AgentBinaryFrame.encode(headerData: headerData)
+    } catch {
+      let fallback = "{\"protocol\":\"\(protocolName)\",\"id\":\"unknown\",\"ok\":false,\"error\":{\"code\":\"encode_failed\",\"message\":\"Unable to encode response\"}}"
+      let headerData = Data(fallback.utf8)
+      return (try? AgentBinaryFrame.encode(headerData: headerData)) ?? headerData
+    }
   }
 }
 
@@ -501,4 +714,18 @@ private struct ErrorEnvelope: Encodable {
 private struct ErrorPayload: Encodable {
   let code: String
   let message: String
+  let details: JSONValue?
+
+  private enum CodingKeys: String, CodingKey {
+    case code
+    case message
+    case details
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(code, forKey: .code)
+    try container.encode(message, forKey: .message)
+    try container.encodeIfPresent(details, forKey: .details)
+  }
 }

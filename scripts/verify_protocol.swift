@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -43,7 +44,9 @@ func runProtocolVerifier() throws {
     "screenshot.cursor",
     "screenshot.webp",
     "screenshot.binary",
-    "osascript.run"
+    "functions.list",
+    "functions.run",
+    "functions.propose"
   ], "capabilities")
 
   let capture = try sendFrame(
@@ -89,7 +92,7 @@ func runProtocolVerifier() throws {
 
   try runAccessibilityVerifier(configuration: configuration)
 
-  try runOsascriptVerifier(configuration: configuration)
+  try runGuardrailsAndFunctionsVerifier(configuration: configuration)
 
   try runConfigurationVerifier()
   try runFileEditingVerifier(permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .unknown)))
@@ -102,7 +105,12 @@ func runAccessibilityVerifier(configuration: AgentConfiguration) throws {
     configuration: configuration,
     permissions: axPermissions,
     screenshots: FakeScreenshotService(capturedImage: screenshot),
-    accessibility: FakeAccessibilityService()
+    accessibility: FakeAccessibilityService(),
+    axPermissionCoordinator: AXPermissionCoordinator(
+      rules: [AXAppPermissionRule(bundleID: "com.apple.TextEdit", appName: "TextEdit", mode: .control)],
+      prompter: FakePermissionPrompter(response: .allowOnce)
+    ),
+    axTargetResolver: FakeAXTargetResolver()
   )
 
   let status: Envelope<AgentStatusPayload> = try send(
@@ -221,43 +229,1319 @@ func runAccessibilityVerifier(configuration: AgentConfiguration) throws {
   expect(deniedStatus.data?.capabilities.contains("ax.find") == false, "ax capabilities must be hidden when accessibility is denied")
 }
 
-func runOsascriptVerifier(configuration: AgentConfiguration) throws {
+func runGuardrailsAndFunctionsVerifier(configuration: AgentConfiguration) throws {
   let screenshot = CapturedImage(data: Data([0x52, 0x49]), mimeType: "image/webp", width: 1, height: 1)
-  let fakeOsascript = FakeOsascriptService(
-    result: OsascriptRunPayload(language: "applescript", exitCode: 0, stdout: "paused\n", stderr: "", timedOut: false)
+  let functionState = FunctionRuntimeState()
+  let registry = FunctionRegistry(functions: [VerifierReadFunction(), VerifierWriteFunction()])
+  let allowCoordinator = AXPermissionCoordinator(
+    rules: [
+      AXAppPermissionRule(bundleID: "com.example.TestApp", appName: "Test App", mode: .control),
+      AXAppPermissionRule(target: GlobalPermissionCategory.power.permissionTarget, mode: .observe)
+    ],
+    prompter: FakePermissionPrompter(response: .allowOnce)
   )
   let handler = AgentRequestHandler(
     configuration: configuration,
     permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
     screenshots: FakeScreenshotService(capturedImage: screenshot),
-    osascript: fakeOsascript
+    functionRegistry: registry,
+    functionState: functionState,
+    automationPermissions: FakeAutomationPermissionService(status: .authorized),
+    axPermissionCoordinator: allowCoordinator,
+    axTargetResolver: FakeAXTargetResolver()
   )
 
-  // osascript.run must work without accessibility or screen recording permission.
-  let run: Envelope<OsascriptRunPayload> = try send(
+  let catalog: Envelope<FunctionListPayload> = try send(
+    AgentRequest(id: "req_functions_list", action: "functions.list", params: AgentRequestParams()),
+    to: handler
+  )
+  expect(catalog.ok, "functions.list should be ok")
+  expect(catalog.data?.functions.contains(where: { $0.name == "test.read" }) == true, "functions.list should include registered functions")
+
+  let read: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "req_functions_read", action: "functions.run", params: AgentRequestParams(functionName: "test.read", args: ["message": .string("hello")])),
+    to: handler
+  )
+  expect(read.ok, "enabled tier-1 function should run")
+  expectEqual(read.data?.result.value, .object("message", .string("hello")), "tier-1 result")
+
+  let invalidArgs: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_functions_invalid", action: "functions.run", params: AgentRequestParams(functionName: "test.read", args: [:])),
+    to: handler
+  )
+  expect(!invalidArgs.ok, "invalid function args should fail")
+  expectEqual(invalidArgs.error?.code, "invalid_args", "invalid args error code")
+
+  let disabled: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_functions_disabled", action: "functions.run", params: AgentRequestParams(functionName: "test.write", args: [:])),
+    to: handler
+  )
+  expect(!disabled.ok, "tier-2 function must be disabled by default")
+  expectEqual(disabled.error?.code, "function_disabled", "disabled function error code")
+
+  functionState.setEnabled(true, for: "test.write")
+  let write: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "req_functions_write", action: "functions.run", params: AgentRequestParams(functionName: "test.write", args: [:])),
+    to: handler
+  )
+  expect(write.ok, "enabled and allowed tier-2 function should run")
+
+  let unknownFunction: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_unknown_function", action: "functions.run", params: AgentRequestParams(functionName: "missing.function", args: [:])),
+    to: handler
+  )
+  expect(!unknownFunction.ok, "unknown function should fail")
+  expectEqual(unknownFunction.error?.code, "unknown_function", "unknown function error code")
+
+  let removedRawScript: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_removed_raw_script", action: "osascript.run", params: AgentRequestParams()),
+    to: handler
+  )
+  expect(!removedRawScript.ok, "raw osascript action must be removed")
+  expectEqual(removedRawScript.error?.code, "unknown_action", "removed raw osascript error code")
+
+  let proposal: Envelope<FunctionProposalPayload> = try send(
     AgentRequest(
-      id: "req_osascript_run",
-      action: "osascript.run",
-      params: AgentRequestParams(script: "tell application \"Music\" to pause", language: "applescript", timeout: 10)
+      id: "req_functions_propose",
+      action: "functions.propose",
+      params: AgentRequestParams(name: "sample.template", description: "A safe sample", rationale: "Verification", exampleScript: "return $value")
     ),
     to: handler
   )
-  expect(run.ok, "osascript.run should be ok")
-  expectEqual(run.data?.exitCode, 0, "osascript.run exit code")
-  expectEqual(run.data?.stdout, "paused\n", "osascript.run stdout")
-  expectEqual(run.data?.language, "applescript", "osascript.run language")
-  expectEqual(run.data?.timedOut, false, "osascript.run timedOut")
-  expectEqual(fakeOsascript.lastScript, "tell application \"Music\" to pause", "osascript.run passes script through")
-  expectEqual(fakeOsascript.lastLanguage, "applescript", "osascript.run passes language through")
-  expectEqual(fakeOsascript.lastTimeout, 10, "osascript.run passes timeout through")
+  expect(proposal.ok, "functions.propose should store a proposal")
+  expectEqual(functionState.snapshot().proposals.count, 1, "proposal inbox count")
 
-  // Missing script must fail with invalid_request.
-  let missingScript: Envelope<EmptyPayload> = try send(
-    AgentRequest(id: "req_osascript_missing", action: "osascript.run", params: AgentRequestParams()),
+  let unapprovedState = FunctionRuntimeState(enabledFunctionNames: ["test.write"])
+  let unapprovedHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    functionRegistry: registry,
+    functionState: unapprovedState,
+    automationPermissions: FakeAutomationPermissionService(status: .authorized),
+    axPermissionCoordinator: AXPermissionCoordinator(
+      prompter: FakePermissionPrompter(response: .notNow)
+    ),
+    axTargetResolver: FakeAXTargetResolver()
+  )
+  let unapprovedControl: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_function_unapproved", action: "functions.run", params: AgentRequestParams(functionName: "test.write", args: [:])),
+    to: unapprovedHandler
+  )
+  expect(!unapprovedControl.ok, "default-deny must block an unapproved function write")
+  expectEqual(unapprovedControl.error?.code, "app_permission_required", "app permission error code")
+  guard case .object(let permissionDetails)? = unapprovedControl.error?.details else {
+    throw NSError(domain: "ProtocolVerifier", code: 4, userInfo: [NSLocalizedDescriptionKey: "Missing app permission details"])
+  }
+  expectEqual(permissionDetails["bundleID"], .string("com.example.TestApp"), "app permission bundle detail")
+  expectEqual(permissionDetails["pending"], .bool(false), "Not Now must not report a pending request")
+
+  let engine = AXPermissionRuleEngine(rules: [])
+  expectEqual(engine.decision(for: nil, intent: .observe), .requiresApproval, "unknown app reads should require approval")
+  expectEqual(engine.decision(for: nil, intent: .control), .requiresApproval, "unknown app writes should require approval")
+  let observeEngine = AXPermissionRuleEngine(rules: [
+    AXAppPermissionRule(bundleID: "com.example.Observe", appName: "Observe", mode: .observe)
+  ])
+  expectEqual(observeEngine.decision(for: "com.example.Observe", intent: .observe), .allow, "Observe should allow reads")
+  expectEqual(observeEngine.decision(for: "com.example.Observe", intent: .control), .requiresApproval, "Observe should not allow control")
+
+  let timeoutCoordinator = AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .timedOut))
+  do {
+    try timeoutCoordinator.authorizeControl(target: AXPermissionTarget(bundleID: "com.example.Pending", appName: "Pending"), action: "ax.perform")
+    expect(false, "timed-out prompt should require permission")
+  } catch let error as AgentProtocolError {
+    expectEqual(error.code, "app_permission_required", "timeout permission error")
+  }
+  expectEqual(timeoutCoordinator.snapshot().pendingRequests.count, 1, "timed-out prompt should enqueue a pending request")
+
+  let unsafeProposal = try functionState.submitProposal(
+    name: "unsafe.template",
+    description: "Unsafe",
+    rationale: "Verifier",
+    exampleScript: "do shell script \"id\""
+  )
+  do {
+    _ = try functionState.approveProposal(
+      id: unsafeProposal.id,
+      approvedSourceDigest: TemplateSourceReview.digest(for: unsafeProposal.exampleScript ?? "")
+    )
+    expect(false, "unsafe template should not be approvable")
+  } catch let error as AgentProtocolError {
+    expectEqual(error.code, "invalid_args", "unsafe template rejection code")
+  }
+
+  print("Verifier: permission coordinator hardening")
+  try verifyPermissionCoordinatorHardening()
+  print("Verifier: visibility and captured PID dispatch")
+  try verifyVisibilityAndCapturedPIDDispatch(configuration: configuration, screenshot: screenshot)
+  print("Verifier: final function gates and automation")
+  try verifyFunctionFinalGateAndAutomationBranches(configuration: configuration, screenshot: screenshot)
+  print("Verifier: global permission categories")
+  try verifyGlobalPermissionCategories(configuration: configuration, screenshot: screenshot)
+  print("Verifier: stored template review and output bounds")
+  try verifyStoredTemplateReviewAndOutputBounds()
+}
+
+func expectAgentErrorCode(_ code: String, operation: () throws -> Void) throws -> AgentProtocolError {
+  do {
+    try operation()
+  } catch let error as AgentProtocolError {
+    expectEqual(error.code, code, "protocol error code")
+    return error
+  }
+  throw NSError(domain: "ProtocolVerifier", code: 5, userInfo: [NSLocalizedDescriptionKey: "Expected protocol error \(code)"])
+}
+
+func verifyPermissionCoordinatorHardening() throws {
+  let target = AXPermissionTarget(bundleID: "com.example.Session", appName: "Session App", pid: 77)
+
+  let defaultDeny = AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .notNow))
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try defaultDeny.authorizeObservation(target: target, action: "ax.get-tree")
+  }
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try defaultDeny.authorizeControl(target: target, action: "ax.perform")
+  }
+  expect(defaultDeny.snapshot().rules.isEmpty, "Not Now must not persist a negative rule")
+
+  let observeOnce = AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .allowOnce))
+  try observeOnce.authorizeObservation(target: target, action: "ax.get-tree")
+  try observeOnce.recheckObservationWithoutPrompt(target: target, action: "ax.get-tree")
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try observeOnce.recheckControlWithoutPrompt(target: target, action: "ax.perform")
+  }
+  expect(observeOnce.snapshot().rules.isEmpty, "Allow Once Observe must remain session-only")
+
+  let escalationPrompter = SequencePermissionPrompter(responses: [.allowOnce, .timedOut])
+  let observeThenDismissControl = AXPermissionCoordinator(prompter: escalationPrompter)
+  try observeThenDismissControl.authorizeObservation(target: target, action: "ax.get-tree")
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try observeThenDismissControl.authorizeControl(target: target, action: "ax.perform")
+  }
+  guard let pendingControlID = observeThenDismissControl.snapshot().pendingRequests.first?.id else {
+    throw NSError(domain: "ProtocolVerifier", code: 13, userInfo: [NSLocalizedDescriptionKey: "Expected a pending Control escalation"])
+  }
+  expect(
+    observeThenDismissControl.resolvePendingRequest(id: pendingControlID, resolution: .dismiss),
+    "dismissed Control escalation should be removed"
+  )
+  try observeThenDismissControl.recheckObservationWithoutPrompt(target: target, action: "ax.get-tree")
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try observeThenDismissControl.recheckControlWithoutPrompt(target: target, action: "ax.perform")
+  }
+
+  let observeAlways = AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .allowAlways))
+  try observeAlways.authorizeObservation(target: target, action: "ax.get-tree")
+  expectEqual(observeAlways.snapshot().rules.first?.mode, .observe, "Always Allow Observe should persist Observe")
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try observeAlways.recheckControlWithoutPrompt(target: target, action: "ax.perform")
+  }
+
+  let controlAlways = AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .allowAlways))
+  try controlAlways.authorizeControl(target: target, action: "ax.perform")
+  expectEqual(controlAlways.snapshot().rules.first?.mode, .control, "Always Allow Control should persist Control")
+  try controlAlways.recheckObservationWithoutPrompt(target: target, action: "ax.get-tree")
+  try controlAlways.recheckControlWithoutPrompt(target: target, action: "ax.perform")
+  controlAlways.replaceRules([])
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try controlAlways.recheckObservationWithoutPrompt(target: target, action: "ax.get-tree")
+  }
+
+  let timeout = AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .timedOut))
+  let timeoutError = try expectAgentErrorCode("app_permission_required") {
+    try timeout.authorizeObservation(target: target, action: "ax.get-tree")
+  }
+  guard case .object(let timeoutDetails)? = timeoutError.details else {
+    throw NSError(domain: "ProtocolVerifier", code: 6, userInfo: [NSLocalizedDescriptionKey: "Timed-out approval lacks details"])
+  }
+  expectEqual(timeoutDetails["pending"], .bool(true), "timeout should report a queued request")
+  expectEqual(timeout.snapshot().pendingRequests.first?.intent, .observe, "pending request must retain requested intent")
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try timeout.authorizeObservation(target: target, action: "ax.get-tree")
+  }
+  expectEqual(timeout.snapshot().pendingRequests.count, 1, "identical timeouts must deduplicate")
+  if let pendingID = timeout.snapshot().pendingRequests.first?.id {
+    expect(timeout.resolvePendingRequest(id: pendingID, resolution: .allowAlways), "pending Observe request should resolve")
+    expect(timeout.snapshot().pendingRequests.isEmpty, "resolved pending request should be removed")
+    try timeout.recheckObservationWithoutPrompt(target: target, action: "ax.get-tree")
+  } else {
+    throw NSError(domain: "ProtocolVerifier", code: 12, userInfo: [NSLocalizedDescriptionKey: "Expected a pending Observe request"])
+  }
+
+  let capped = AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .timedOut))
+  for index in 0..<(AXPermissionCoordinator.maximumPendingRequestCount + 1) {
+    let candidate = AXPermissionTarget(bundleID: "com.example.Pending\(index)", appName: "Pending \(index)")
+    _ = try expectAgentErrorCode("app_permission_required") {
+      try capped.authorizeControl(target: candidate, action: "ax.perform")
+    }
+  }
+  expectEqual(capped.snapshot().pendingRequests.count, AXPermissionCoordinator.maximumPendingRequestCount, "pending inbox must be capped")
+
+  let persistedPending = AXPermissionCoordinator(pendingRequests: [
+    AXPendingPermissionRequest(
+      target: AXPermissionTarget(bundleID: "com.example.Loaded", appName: "Loaded"),
+      intent: .control,
+      action: "ax.perform",
+      context: "first"
+    ),
+    AXPendingPermissionRequest(
+      target: AXPermissionTarget(bundleID: "com.example.Loaded", appName: "Loaded"),
+      intent: .control,
+      action: "ax.perform",
+      context: "duplicate"
+    ),
+    AXPendingPermissionRequest(
+      target: AXPermissionTarget(bundleID: "com.example.Invalid", appName: String(repeating: "x", count: 256)),
+      intent: .control,
+      action: "ax.perform",
+      context: "invalid"
+    )
+  ])
+  expectEqual(persistedPending.snapshot().pendingRequests.count, 1, "loaded pending requests must be sanitized and deduplicated")
+
+  let recordingPrompter = CountingPermissionPrompter(response: .timedOut)
+  let unresolved = AXPermissionCoordinator(prompter: recordingPrompter)
+  let unresolvedError = try expectAgentErrorCode("app_permission_required") {
+    try unresolved.authorizeControl(
+      target: AXPermissionTarget(bundleID: nil, appName: "Spoofed Safari"),
+      action: "ax.perform"
+    )
+  }
+  guard case .object(let unresolvedDetails)? = unresolvedError.details else {
+    throw NSError(domain: "ProtocolVerifier", code: 10, userInfo: [NSLocalizedDescriptionKey: "Unresolved target lacks details"])
+  }
+  expectEqual(unresolvedDetails["pending"], .bool(false), "unresolved spoofable targets must not queue pending approval")
+  expectEqual(recordingPrompter.count, 0, "unresolved targets must not show an approval prompt")
+
+  let invalidObservePrompter = CountingPermissionPrompter(response: .timedOut)
+  let invalidObserve = AXPermissionCoordinator(prompter: invalidObservePrompter)
+  let invalidObserveError = try expectAgentErrorCode("app_permission_required") {
+    try invalidObserve.authorizeObservation(
+      target: PermissionTarget(applicationBundleID: "invalid", appName: "Invalid"),
+      action: "ax.get-tree"
+    )
+  }
+  guard case .object(let invalidObserveDetails)? = invalidObserveError.details else {
+    throw NSError(domain: "ProtocolVerifier", code: 14, userInfo: [NSLocalizedDescriptionKey: "Invalid Observe target lacks details"])
+  }
+  expectEqual(invalidObserveDetails["intent"], .string("observe"), "invalid Observe errors must preserve the requested intent")
+  expectEqual(invalidObservePrompter.count, 0, "invalid Observe targets must not show a prompt")
+
+  let global = GlobalPermissionCategory.clipboard.permissionTarget
+  let globalObserve = AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .allowAlways))
+  try globalObserve.authorizeObservation(target: global, action: "functions.run → system.get-clipboard")
+  expectEqual(globalObserve.snapshot().rules.first?.target.kind, .category, "global grants must remain category targets")
+  expectEqual(globalObserve.snapshot().rules.first?.target.identifier, GlobalPermissionCategory.clipboard.rawValue, "global category ID")
+  _ = try expectAgentErrorCode("app_permission_required") {
+    try globalObserve.recheckControlWithoutPrompt(target: global, action: "functions.run → system.set-clipboard")
+  }
+
+  let legacyJSON: [String: Any] = [
+    "rules": [
+      ["bundleID": "com.example.LegacyDeny", "appName": "Legacy Deny", "mode": "deny"],
+      ["bundleID": "com.example.LegacyObserve", "appName": "Legacy Observe", "mode": "observe"]
+    ],
+    "pendingRequests": []
+  ]
+  let migrated = try JSONDecoder().decode(
+    AXPermissionStateSnapshot.self,
+    from: JSONSerialization.data(withJSONObject: legacyJSON)
+  )
+  expectEqual(migrated.rules.count, 1, "legacy deny rules must migrate to default-deny absence")
+  expectEqual(migrated.rules.first?.mode, .observe, "legacy Observe should survive migration")
+
+  let currentSnapshot = AXPermissionStateSnapshot(
+    rules: [AXAppPermissionRule(target: GlobalPermissionCategory.network.permissionTarget, mode: .observe)],
+    pendingRequests: []
+  )
+  let roundTrip = try JSONDecoder().decode(
+    AXPermissionStateSnapshot.self,
+    from: JSONEncoder().encode(currentSnapshot)
+  )
+  expectEqual(roundTrip, currentSnapshot, "current generalized permission state must round-trip through persistence")
+}
+
+func verifyVisibilityAndCapturedPIDDispatch(configuration: AgentConfiguration, screenshot: CapturedImage) throws {
+  let visible = AXAppPayload(pid: 701, name: "Visible", bundleId: "com.example.Visible", active: true, windowCount: 1)
+  let hidden = AXAppPayload(pid: 702, name: "Hidden", bundleId: "com.example.Hidden", active: false, windowCount: 1)
+  let accessibility = RecordingAccessibilityService(apps: [visible, hidden])
+  let resolution = AXResolvedTarget(
+    target: AXPermissionTarget(bundleID: "com.example.Visible", appName: "Visible", pid: 701),
+    pid: 701,
+    wasResolved: true
+  )
+  let resolver = RecordingAXTargetResolver(resolution: resolution, isCurrent: true)
+  let discoveryDeniedHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .granted)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    accessibility: accessibility,
+    axPermissionCoordinator: AXPermissionCoordinator(
+      prompter: FakePermissionPrompter(response: .notNow)
+    ),
+    axTargetResolver: resolver
+  )
+  let discoveryDenied: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "ax_list_apps_default_deny", action: "ax.list-apps", params: AgentRequestParams()),
+    to: discoveryDeniedHandler
+  )
+  expect(!discoveryDenied.ok, "ax.list-apps must require the Application Discovery Observe grant")
+  expectEqual(discoveryDenied.error?.code, "app_permission_required", "Application Discovery default-deny code")
+
+  let coordinator = AXPermissionCoordinator(rules: [
+    AXAppPermissionRule(bundleID: "com.example.Visible", appName: "Visible", mode: .control),
+    AXAppPermissionRule(target: GlobalPermissionCategory.applicationDiscovery.permissionTarget, mode: .observe)
+  ], prompter: FakePermissionPrompter(response: .notNow))
+  let handler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .granted)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    accessibility: accessibility,
+    axPermissionCoordinator: coordinator,
+    axTargetResolver: resolver
+  )
+
+  let listed: Envelope<AXAppListPayload> = try send(
+    AgentRequest(id: "filtered_ax_apps", action: "ax.list-apps", params: AgentRequestParams()),
     to: handler
   )
-  expect(!missingScript.ok, "osascript.run without script should fail")
-  expectEqual(missingScript.error?.code, "invalid_request", "osascript.run missing script error code")
+  expect(listed.ok, "Application Discovery grant should allow ax.list-apps")
+  expectEqual(
+    listed.data?.apps.map(\.bundleId),
+    ["com.example.Visible", "com.example.Hidden"],
+    "Application Discovery should return the global process list after explicit approval"
+  )
+
+  let typed: Envelope<AXSimpleResultPayload> = try send(
+    AgentRequest(id: "captured_frontmost_pid", action: "ax.type-text", params: AgentRequestParams(text: "hello")),
+    to: handler
+  )
+  expect(typed.ok, "captured PID dispatch should succeed")
+  expectEqual(accessibility.typedPIDs, [701], "synthetic input must use the authorized captured PID")
+  expectEqual(resolver.frontmostFallbackRequests, [true], "untargeted synthetic input must resolve the frontmost target")
+
+  let staleAccessibility = RecordingAccessibilityService(apps: [visible])
+  let staleHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .granted)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    accessibility: staleAccessibility,
+    axPermissionCoordinator: AXPermissionCoordinator(
+      rules: [AXAppPermissionRule(bundleID: "com.example.Visible", appName: "Visible", mode: .control)],
+      prompter: FakePermissionPrompter(response: .notNow)
+    ),
+    axTargetResolver: RecordingAXTargetResolver(resolution: resolution, isCurrent: false)
+  )
+  let stale: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "stale_frontmost_pid", action: "ax.type-text", params: AgentRequestParams(text: "hello")),
+    to: staleHandler
+  )
+  expect(!stale.ok, "stale PID must be rejected before synthetic input")
+  expectEqual(stale.error?.code, "app_permission_required", "stale target error code")
+  expect(staleAccessibility.typedPIDs.isEmpty, "stale PID must not receive input")
+}
+
+func verifyFunctionFinalGateAndAutomationBranches(configuration: AgentConfiguration, screenshot: CapturedImage) throws {
+  let target = FunctionTarget(bundleID: "com.example.TestApp", appName: "Test App", requiresAutomation: true)
+
+  func makeHandler(
+    function: any MacOSFunction,
+    state: FunctionRuntimeState,
+    automation: AutomationPermissionServicing,
+    coordinator: AXPermissionCoordinator,
+    remoteEnabled: @escaping @Sendable () -> Bool = { true }
+  ) -> AgentRequestHandler {
+    AgentRequestHandler(
+      configuration: configuration,
+      permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
+      screenshots: FakeScreenshotService(capturedImage: screenshot),
+      functionRegistry: FunctionRegistry(functions: [function]),
+      functionState: state,
+      automationPermissions: automation,
+      axPermissionCoordinator: coordinator,
+      axTargetResolver: FakeAXTargetResolver(),
+      remoteControlEnabled: remoteEnabled
+    )
+  }
+
+  let readCounter = LockedCounter()
+  let targetedRead = ProbeFunction(name: "probe.read", tier: .read, target: target, counter: readCounter)
+  let unapprovedRead = makeHandler(
+    function: targetedRead,
+    state: FunctionRuntimeState(),
+    automation: FakeAutomationPermissionService(status: .authorized),
+    coordinator: AXPermissionCoordinator(
+      prompter: FakePermissionPrompter(response: .notNow)
+    )
+  )
+  let readUnapproved: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "tier_one_observation_unapproved", action: "functions.run", params: AgentRequestParams(functionName: "probe.read", args: [:])),
+    to: unapprovedRead
+  )
+  expect(!readUnapproved.ok, "targeted Tier-1 functions must require Observe approval")
+  expectEqual(readUnapproved.error?.code, "app_permission_required", "Tier-1 observation gate code")
+  expectEqual(readCounter.value, 0, "unapproved Tier-1 function must not run")
+
+  let hiddenRunning = ApplicationDescriptor(
+    bundleID: "com.example.Hidden",
+    appName: "Hidden Running",
+    pid: 733,
+    frontmost: false
+  )
+  let hiddenStopped = ApplicationDescriptor(
+    bundleID: "com.example.Stopped",
+    appName: "Hidden Stopped"
+  )
+  let appResolver = FakeApplicationResolver(
+    running: [hiddenRunning],
+    names: [
+      "Hidden Running": .resolved(hiddenRunning),
+      "Hidden Stopped": .resolved(hiddenStopped),
+      "Missing App": .notFound,
+      "Ambiguous App": .ambiguous
+    ]
+  )
+  let appStateHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    functionRegistry: FunctionRegistry.standard(applicationResolver: appResolver),
+    functionState: FunctionRuntimeState(),
+    automationPermissions: FakeAutomationPermissionService(status: .authorized),
+    axPermissionCoordinator: AXPermissionCoordinator(
+      prompter: FakePermissionPrompter(response: .notNow)
+    ),
+    axTargetResolver: FakeAXTargetResolver()
+  )
+  let hiddenAppQuery: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "app_is_running_denied",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "app.is-running", args: ["bundleID": .string(hiddenRunning.bundleID)])
+    ),
+    to: appStateHandler
+  )
+  expect(!hiddenAppQuery.ok, "app.is-running must not disclose an unapproved bundle")
+  expectEqual(hiddenAppQuery.error?.code, "app_permission_required", "app.is-running bundle default-deny code")
+
+  let hiddenRunningName: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "app_is_running_running_name_denied",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "app.is-running", args: ["name": .string(hiddenRunning.appName)])
+    ),
+    to: appStateHandler
+  )
+  expect(!hiddenRunningName.ok, "running app name must be authorized before status is disclosed")
+  expectEqual(hiddenRunningName.error?.code, "app_permission_required", "running app name default-deny code")
+
+  let hiddenStoppedName: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "app_is_running_stopped_name_denied",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "app.is-running", args: ["name": .string(hiddenStopped.appName)])
+    ),
+    to: appStateHandler
+  )
+  expect(!hiddenStoppedName.ok, "non-running app name must be authorized before false is disclosed")
+  expectEqual(hiddenStoppedName.error?.code, "app_permission_required", "non-running app name default-deny code")
+
+  let unresolvedName: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "app_is_running_unresolved_name",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "app.is-running", args: ["name": .string("Missing App")])
+    ),
+    to: appStateHandler
+  )
+  expect(!unresolvedName.ok, "unresolved app names must not return an unauthorized false status")
+  expectEqual(unresolvedName.error?.code, "app_not_found", "unresolved app name code")
+
+  let ambiguousName: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "app_is_running_ambiguous_name",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "app.is-running", args: ["name": .string("Ambiguous App")])
+    ),
+    to: appStateHandler
+  )
+  expect(!ambiguousName.ok, "ambiguous app names must not return an unauthorized status")
+  expectEqual(ambiguousName.error?.code, "app_not_found", "ambiguous app name code")
+
+  let unknownBundlePrompter = CountingPermissionPrompter(response: .allowAlways)
+  let unknownBundleHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    functionRegistry: FunctionRegistry.standard(applicationResolver: FakeApplicationResolver()),
+    functionState: FunctionRuntimeState(),
+    automationPermissions: FakeAutomationPermissionService(status: .authorized),
+    axPermissionCoordinator: AXPermissionCoordinator(prompter: unknownBundlePrompter),
+    axTargetResolver: FakeAXTargetResolver()
+  )
+  let unknownBundle: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "app_is_running_unknown_bundle",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "app.is-running", args: ["bundleID": .string("com.example.Invented")])
+    ),
+    to: unknownBundleHandler
+  )
+  expect(!unknownBundle.ok, "an unknown bundle must not create a permission prompt")
+  expectEqual(unknownBundle.error?.code, "app_not_found", "unknown app bundle code")
+  expectEqual(unknownBundlePrompter.count, 0, "unknown app bundle must not be grantable")
+
+  let tccCounter = LockedCounter()
+  let tccState = FunctionRuntimeState(enabledFunctionNames: ["probe.tcc"])
+  let tccAutomation = MutatingAutomationPermissionService(initial: .notDetermined, afterRequest: .authorized)
+  let tccHandler = makeHandler(
+    function: ProbeFunction(name: "probe.tcc", tier: .write, target: target, counter: tccCounter),
+    state: tccState,
+    automation: tccAutomation,
+    coordinator: AXPermissionCoordinator(rules: [AXAppPermissionRule(bundleID: target.bundleID, appName: target.appName, mode: .control)])
+  )
+  let tccAllowed: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "tcc_prompt_allowed", action: "functions.run", params: AgentRequestParams(functionName: "probe.tcc", args: [:])),
+    to: tccHandler
+  )
+  expect(tccAllowed.ok, "not-determined TCC status should retry after an authorized request")
+  expectEqual(tccAutomation.requestCount, 1, "not-determined TCC must request once")
+  expectEqual(tccCounter.value, 1, "authorized function should run once")
+
+  let deniedTCCCounter = LockedCounter()
+  let deniedTCCHandler = makeHandler(
+    function: ProbeFunction(name: "probe.tcc-denied", tier: .write, target: target, counter: deniedTCCCounter),
+    state: FunctionRuntimeState(enabledFunctionNames: ["probe.tcc-denied"]),
+    automation: FakeAutomationPermissionService(status: .denied),
+    coordinator: AXPermissionCoordinator(rules: [AXAppPermissionRule(bundleID: target.bundleID, appName: target.appName, mode: .control)])
+  )
+  let deniedTCC: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "tcc_denied", action: "functions.run", params: AgentRequestParams(functionName: "probe.tcc-denied", args: [:])),
+    to: deniedTCCHandler
+  )
+  expect(!deniedTCC.ok, "denied TCC should block function dispatch")
+  expectEqual(deniedTCC.error?.code, "automation_permission_required", "TCC denied error code")
+  expectEqual(deniedTCCCounter.value, 0, "TCC-denied function must not run")
+
+  let globalCounter = LockedCounter()
+  let globalState = FunctionRuntimeState(enabledFunctionNames: ["probe.global"])
+  let globalFlag = LockedBoolean(true)
+  let globalAutomation = MutatingAutomationPermissionService(initial: .notDetermined, afterRequest: .authorized) {
+    globalFlag.value = false
+  }
+  let globalHandler = makeHandler(
+    function: ProbeFunction(name: "probe.global", tier: .write, target: target, counter: globalCounter),
+    state: globalState,
+    automation: globalAutomation,
+    coordinator: AXPermissionCoordinator(rules: [AXAppPermissionRule(bundleID: target.bundleID, appName: target.appName, mode: .control)]),
+    remoteEnabled: { globalFlag.value }
+  )
+  let globalRevoked: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "global_revoked_during_tcc", action: "functions.run", params: AgentRequestParams(functionName: "probe.global", args: [:])),
+    to: globalHandler
+  )
+  expect(!globalRevoked.ok, "global remote-control revocation must be rechecked after TCC")
+  expectEqual(globalRevoked.error?.code, "invalid_request", "global revocation error code")
+  expectEqual(globalCounter.value, 0, "globally revoked function must not run")
+
+  let toggleCounter = LockedCounter()
+  let toggleState = FunctionRuntimeState(enabledFunctionNames: ["probe.toggle"])
+  let toggleAutomation = MutatingAutomationPermissionService(initial: .notDetermined, afterRequest: .authorized) {
+    toggleState.setEnabled(false, for: "probe.toggle")
+  }
+  let toggleHandler = makeHandler(
+    function: ProbeFunction(name: "probe.toggle", tier: .write, target: target, counter: toggleCounter),
+    state: toggleState,
+    automation: toggleAutomation,
+    coordinator: AXPermissionCoordinator(rules: [AXAppPermissionRule(bundleID: target.bundleID, appName: target.appName, mode: .control)])
+  )
+  let disabledAfterPrompt: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "function_disabled_during_tcc", action: "functions.run", params: AgentRequestParams(functionName: "probe.toggle", args: [:])),
+    to: toggleHandler
+  )
+  expect(!disabledAfterPrompt.ok, "function toggle must be rechecked after TCC")
+  expectEqual(disabledAfterPrompt.error?.code, "function_disabled", "revoked function toggle error code")
+  expectEqual(toggleCounter.value, 0, "disabled function must not run")
+
+  let ruleCounter = LockedCounter()
+  let ruleCoordinator = AXPermissionCoordinator(rules: [AXAppPermissionRule(bundleID: target.bundleID, appName: target.appName, mode: .control)])
+  let ruleAutomation = MutatingAutomationPermissionService(initial: .notDetermined, afterRequest: .authorized) {
+    ruleCoordinator.replaceRules([])
+  }
+  let ruleHandler = makeHandler(
+    function: ProbeFunction(name: "probe.rule", tier: .write, target: target, counter: ruleCounter),
+    state: FunctionRuntimeState(enabledFunctionNames: ["probe.rule"]),
+    automation: ruleAutomation,
+    coordinator: ruleCoordinator
+  )
+  let ruleRevoked: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "app_rule_revoked_during_tcc", action: "functions.run", params: AgentRequestParams(functionName: "probe.rule", args: [:])),
+    to: ruleHandler
+  )
+  expect(!ruleRevoked.ok, "app rule changes must be rechecked after TCC")
+  expectEqual(ruleRevoked.error?.code, "app_permission_required", "revoked app rule error code")
+  expectEqual(ruleCounter.value, 0, "app-rule revoked function must not run")
+
+  let templateSource = """
+  tell application id "com.example.TestApp"
+    return $value
+  end tell
+  """
+  let templateResolver = StaticTemplateTargetResolver(targets: [target.bundleID.lowercased(): target])
+  let templateState = FunctionRuntimeState(templateTargetResolver: templateResolver)
+  let originalProposal = try templateState.submitProposal(
+    name: "identity.template",
+    description: "Identity regression",
+    rationale: "Verifier",
+    exampleScript: templateSource
+  )
+  let originalTemplate = try templateState.approveProposal(
+    id: originalProposal.id,
+    approvedSourceDigest: TemplateSourceReview.digest(for: templateSource.trimmingCharacters(in: .whitespacesAndNewlines))
+  )
+  let replacementAutomation = MutatingAutomationPermissionService(initial: .notDetermined, afterRequest: .authorized) {
+    guard templateState.removeTemplate(id: originalTemplate.id) else { return }
+    guard let replacementProposal = try? templateState.submitProposal(
+      name: "identity.template",
+      description: "Identity replacement",
+      rationale: "Verifier",
+      exampleScript: templateSource
+    ) else { return }
+    _ = try? templateState.approveProposal(
+      id: replacementProposal.id,
+      approvedSourceDigest: TemplateSourceReview.digest(for: templateSource.trimmingCharacters(in: .whitespacesAndNewlines))
+    )
+  }
+  let templateHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    functionRegistry: FunctionRegistry(functions: []),
+    functionState: templateState,
+    automationPermissions: replacementAutomation,
+    axPermissionCoordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(bundleID: target.bundleID, appName: target.appName, mode: .control)
+    ]),
+    axTargetResolver: FakeAXTargetResolver()
+  )
+  let staleTemplate: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "template_replaced_during_tcc",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "identity.template", args: ["value": .string("safe")])
+    ),
+    to: templateHandler
+  )
+  expect(!staleTemplate.ok, "a same-name replacement must not inherit an in-flight template authorization")
+  expectEqual(staleTemplate.error?.code, "function_disabled", "stale template identity error code")
+  expect(templateState.executableTemplate(named: "identity.template")?.id != originalTemplate.id, "template replacement regression setup")
+}
+
+func verifyGlobalPermissionCategories(configuration: AgentConfiguration, screenshot: CapturedImage) throws {
+  func makeHandler(
+    functions: [any MacOSFunction],
+    state: FunctionRuntimeState,
+    coordinator: AXPermissionCoordinator
+  ) -> AgentRequestHandler {
+    AgentRequestHandler(
+      configuration: configuration,
+      permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
+      screenshots: FakeScreenshotService(capturedImage: screenshot),
+      functionRegistry: FunctionRegistry(functions: functions),
+      functionState: state,
+      automationPermissions: FakeAutomationPermissionService(status: .authorized),
+      axPermissionCoordinator: coordinator,
+      axTargetResolver: FakeAXTargetResolver()
+    )
+  }
+
+  let category = GlobalPermissionCategory.clipboard
+  let readCounter = LockedCounter()
+  let globalRead = GlobalProbeFunction(name: "probe.global-read", tier: .read, category: category, counter: readCounter)
+  let unapprovedRead = makeHandler(
+    functions: [globalRead],
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .notNow))
+  )
+  let deniedRead: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "global_read_default_deny", action: "functions.run", params: AgentRequestParams(functionName: globalRead.name, args: [:])),
+    to: unapprovedRead
+  )
+  expect(!deniedRead.ok, "unbound read functions must require an explicit global Observe grant")
+  expectEqual(deniedRead.error?.code, "app_permission_required", "global Observe default-deny code")
+  expectEqual(readCounter.value, 0, "unapproved global read must not execute")
+
+  let allowedRead = makeHandler(
+    functions: [globalRead],
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(target: category.permissionTarget, mode: .observe)
+    ])
+  )
+  let allowedReadResult: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "global_read_observe", action: "functions.run", params: AgentRequestParams(functionName: globalRead.name, args: [:])),
+    to: allowedRead
+  )
+  expect(allowedReadResult.ok, "Observe should allow a global read function")
+  expectEqual(readCounter.value, 1, "approved global read should execute exactly once")
+
+  let writeCounter = LockedCounter()
+  let globalWrite = GlobalProbeFunction(name: "probe.global-write", tier: .write, category: category, counter: writeCounter)
+  let writeState = FunctionRuntimeState(enabledFunctionNames: [globalWrite.name])
+  let observeOnlyWrite = makeHandler(
+    functions: [globalWrite],
+    state: writeState,
+    coordinator: AXPermissionCoordinator(
+      rules: [AXAppPermissionRule(target: category.permissionTarget, mode: .observe)],
+      prompter: FakePermissionPrompter(response: .notNow)
+    )
+  )
+  let blockedWrite: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "global_write_observe_only", action: "functions.run", params: AgentRequestParams(functionName: globalWrite.name, args: [:])),
+    to: observeOnlyWrite
+  )
+  expect(!blockedWrite.ok, "Observe must not permit a global write function")
+  expectEqual(blockedWrite.error?.code, "app_permission_required", "global Control upgrade code")
+  expectEqual(writeCounter.value, 0, "Observe-only global grant must not run writes")
+
+  let allowedWrite = makeHandler(
+    functions: [globalWrite],
+    state: writeState,
+    coordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(target: category.permissionTarget, mode: .control)
+    ])
+  )
+  let allowedWriteResult: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "global_write_control", action: "functions.run", params: AgentRequestParams(functionName: globalWrite.name, args: [:])),
+    to: allowedWrite
+  )
+  expect(allowedWriteResult.ok, "Control should allow a global write function")
+  expectEqual(writeCounter.value, 1, "approved global write should execute exactly once")
+
+  let unmappedCounter = LockedCounter()
+  let unmapped = UnmappedProbeFunction(counter: unmappedCounter)
+  let unmappedHandler = makeHandler(
+    functions: [unmapped],
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(target: category.permissionTarget, mode: .control)
+    ])
+  )
+  let unmappedResult: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "unmapped_function", action: "functions.run", params: AgentRequestParams(functionName: unmapped.name, args: [:])),
+    to: unmappedHandler
+  )
+  expect(!unmappedResult.ok, "functions without a permission target must fail closed")
+  expectEqual(unmappedResult.error?.code, "function_failed", "unmapped function gate code")
+  expectEqual(unmappedCounter.value, 0, "unmapped function must not execute")
+
+  let registry = FunctionRegistry.standard()
+  let catalogState = FunctionRuntimeState()
+  let mappings: [(String, [String: JSONValue], GlobalPermissionCategory)] = [
+    ("app.list", [:], .applicationDiscovery),
+    ("system.get-volume", [:], .systemAudio),
+    ("system.get-clipboard", [:], .clipboard),
+    ("system.get-battery", [:], .power),
+    ("system.get-wifi-name", [:], .network),
+    ("system.set-volume", ["volume": .number(50)], .systemAudio),
+    ("system.mute", ["muted": .bool(false)], .systemAudio),
+    ("system.set-clipboard", ["text": .string("test")], .clipboard),
+    ("system.notify", ["message": .string("test")], .notifications),
+    ("dialog.ask-user", ["message": .string("test")], .dialogs)
+  ]
+  for (name, args, expectedCategory) in mappings {
+    guard let function = registry.function(named: name, state: catalogState) else {
+      throw NSError(domain: "ProtocolVerifier", code: 11, userInfo: [NSLocalizedDescriptionKey: "Missing standard function \(name)"])
+    }
+    let plan = try function.makeExecutionPlan(args: args)
+    expectEqual(plan.permissionTarget?.kind, .category, "\(name) must declare a global category")
+    expectEqual(plan.permissionTarget?.identifier, expectedCategory.rawValue, "\(name) global category")
+  }
+  expectEqual(
+    Set(mappings.map { $0.2 }),
+    Set(GlobalPermissionCategory.allCases),
+    "every global permission category must be represented by a curated function"
+  )
+
+  // Keep the always-visible global-capability picker and the executable
+  // catalog in lockstep. A new built-in must be classified as either a global
+  // category, a static app target, or an intentionally dynamic app target.
+  let expectedGlobalCategories = Dictionary(uniqueKeysWithValues: mappings.map { ($0.0, $0.2) })
+  let expectedStaticApplicationTargets: [String: String] = [
+    "finder.get-selection": "com.apple.finder",
+    "finder.get-front-path": "com.apple.finder",
+    "finder.reveal": "com.apple.finder"
+  ]
+  let expectedDynamicAppFunctions: Set<String> = [
+    "app.is-running",
+    "media.now-playing",
+    "browser.get-url",
+    "browser.get-title",
+    "browser.list-tabs",
+    "app.launch",
+    "app.activate",
+    "app.quit",
+    "media.play-pause",
+    "media.next",
+    "media.previous",
+    "browser.open-url",
+    "browser.run-javascript"
+  ]
+  let expectedStandardFunctionNames = Set(expectedGlobalCategories.keys)
+    .union(expectedStaticApplicationTargets.keys)
+    .union(expectedDynamicAppFunctions)
+  let catalog = registry.catalog(
+    state: catalogState,
+    automation: FakeAutomationPermissionService(status: .authorized)
+  )
+  expectEqual(
+    Set(catalog.functions.map(\.name)),
+    expectedStandardFunctionNames,
+    "every standard built-in must have an explicit permission classification"
+  )
+  for entry in catalog.functions {
+    if let category = expectedGlobalCategories[entry.name] {
+      expectEqual(entry.permissionTarget?.kind, .category, "\(entry.name) catalog target kind")
+      expectEqual(entry.permissionTarget?.identifier, category.rawValue, "\(entry.name) catalog category")
+    } else if let bundleID = expectedStaticApplicationTargets[entry.name] {
+      expectEqual(entry.permissionTarget?.kind, .application, "\(entry.name) catalog target kind")
+      expectEqual(entry.permissionTarget?.bundleID, bundleID, "\(entry.name) static app bundle")
+    } else {
+      expect(expectedDynamicAppFunctions.contains(entry.name), "\(entry.name) must be an expected dynamic app function")
+      expectEqual(entry.permissionTarget, nil, "\(entry.name) must not advertise a misleading static target")
+    }
+  }
+}
+
+func verifyStoredTemplateReviewAndOutputBounds() throws {
+  let target = FunctionTarget(bundleID: "com.example.TestApp", appName: "Test App", requiresAutomation: true)
+  let resolver = StaticTemplateTargetResolver(targets: [target.bundleID.lowercased(): target])
+  let state = FunctionRuntimeState(templateTargetResolver: resolver)
+  let source = """
+  tell application id "com.example.TestApp"
+    return $value
+  end tell
+  """
+  let proposal = try state.submitProposal(
+    name: "reviewed.template",
+    description: "Reviewed test template",
+    rationale: "Verifier",
+    exampleScript: source
+  )
+  _ = try expectAgentErrorCode("invalid_args") {
+    _ = try state.approveProposal(id: proposal.id, approvedSourceDigest: "not-the-displayed-digest")
+  }
+  let template = try state.approveProposal(
+    id: proposal.id,
+    approvedSourceDigest: TemplateSourceReview.digest(for: source.trimmingCharacters(in: .whitespacesAndNewlines))
+  )
+  expect(template.isReviewed, "template source metadata must be reviewed")
+  expectEqual(template.targetBundleID, target.bundleID, "reviewed template target bundle")
+  expectEqual(template.targetAppName, target.appName, "reviewed template target app name")
+  expectEqual(template.argumentNames, ["value"], "reviewed template placeholders")
+
+  let registry = FunctionRegistry(functions: [])
+  guard let function = registry.function(named: template.name, state: state) else {
+    throw NSError(domain: "ProtocolVerifier", code: 7, userInfo: [NSLocalizedDescriptionKey: "Reviewed template was not registered"])
+  }
+  let escapedInput = "quote " + String(UnicodeScalar(34)) + " and slash " + String(UnicodeScalar(92)) + " and newline" + String(UnicodeScalar(10))
+  let plan = try function.makeExecutionPlan(args: ["value": .string(escapedInput)])
+  expectEqual(plan.target?.bundleID, target.bundleID, "template must dispatch only to persisted target bundle")
+  let literal = FixedAppleScriptExecutor().appleScriptStringLiteral(escapedInput)
+  let quoteEscape = String(UnicodeScalar(92)) + String(UnicodeScalar(34))
+  let backslashEscape = String(repeating: String(UnicodeScalar(92)), count: 2)
+  let newlineEscape = String(UnicodeScalar(92)) + "n"
+  expect(literal.contains(quoteEscape), "template substitutions must escape quotes")
+  expect(literal.contains(backslashEscape), "template substitutions must escape backslashes")
+  expect(literal.contains(newlineEscape), "template substitutions must escape newlines")
+
+  let dynamic = try state.submitProposal(
+    name: "dynamic.template",
+    description: "Dynamic target",
+    rationale: "Verifier",
+    exampleScript: "tell application \"Test App\" to return \"no\""
+  )
+  _ = try expectAgentErrorCode("invalid_args") {
+    _ = try state.approveProposal(id: dynamic.id, approvedSourceDigest: TemplateSourceReview.digest(for: dynamic.exampleScript ?? ""))
+  }
+  let multiTarget = try state.submitProposal(
+    name: "multi.template",
+    description: "Multi target",
+    rationale: "Verifier",
+    exampleScript: "tell application id \"com.example.TestApp\"\n  tell application id \"com.example.Other\" to return \"no\"\nend tell"
+  )
+  _ = try expectAgentErrorCode("invalid_args") {
+    _ = try state.approveProposal(id: multiTarget.id, approvedSourceDigest: TemplateSourceReview.digest(for: multiTarget.exampleScript ?? ""))
+  }
+  let obfuscated = try state.submitProposal(
+    name: "obfuscated.template",
+    description: "Obfuscated shell",
+    rationale: "Verifier",
+    exampleScript: "tell application id \"com.example.TestApp\"\n  do\\n  shell script \"id\"\nend tell"
+  )
+  _ = try expectAgentErrorCode("invalid_args") {
+    _ = try state.approveProposal(id: obfuscated.id, approvedSourceDigest: TemplateSourceReview.digest(for: obfuscated.exampleScript ?? ""))
+  }
+  let unresolvedState = FunctionRuntimeState(templateTargetResolver: StaticTemplateTargetResolver(targets: [:]))
+  let unresolved = try unresolvedState.submitProposal(
+    name: "unresolved.template",
+    description: "Unresolved target",
+    rationale: "Verifier",
+    exampleScript: source
+  )
+  _ = try expectAgentErrorCode("invalid_args") {
+    _ = try unresolvedState.approveProposal(id: unresolved.id, approvedSourceDigest: TemplateSourceReview.digest(for: source.trimmingCharacters(in: .whitespacesAndNewlines)))
+  }
+
+  let legacyJSON: [String: Any] = [
+    "id": UUID().uuidString,
+    "name": "legacy.template",
+    "summary": "Legacy source",
+    "script": source,
+    "argumentNames": ["value"],
+    "approvedAt": Date().timeIntervalSinceReferenceDate
+  ]
+  let legacy = try JSONDecoder().decode(StoredFunctionTemplate.self, from: JSONSerialization.data(withJSONObject: legacyJSON))
+  expect(!legacy.isReviewed, "legacy metadata must decode fail-closed")
+  let legacyState = FunctionRuntimeState(
+    enabledFunctionNames: [legacy.name],
+    templates: [legacy],
+    templateTargetResolver: resolver
+  )
+  expect(legacyState.executableTemplate(named: legacy.name) == nil, "legacy template must remain disabled until re-review")
+  expect(legacyState.requeueLegacyTemplateForReview(id: legacy.id), "legacy template should be preserved for explicit re-review")
+  expectEqual(legacyState.snapshot().proposals.count, 1, "legacy re-review should populate the proposal inbox")
+
+  let fileManager = FileManager.default
+  let revealFixture = fileManager.temporaryDirectory.appendingPathComponent("okbrain-reveal-\(UUID().uuidString)", isDirectory: true)
+  let allowedRoot = revealFixture.appendingPathComponent("allowed", isDirectory: true)
+  let outsideRoot = revealFixture.appendingPathComponent("outside", isDirectory: true)
+  try fileManager.createDirectory(at: allowedRoot, withIntermediateDirectories: true)
+  try fileManager.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+  defer { try? fileManager.removeItem(at: revealFixture) }
+  let escapingLink = allowedRoot.appendingPathComponent("escape", isDirectory: true)
+  try fileManager.createSymbolicLink(at: escapingLink, withDestinationURL: outsideRoot)
+  let escapedMissingChild = escapingLink.appendingPathComponent("missing.txt").path
+  let fileEditing = LocalFileEditingService(configuration: FileEditingConfiguration(
+    enabled: true,
+    mode: .readWrite,
+    allowedRoots: [FileEditingAllowedRoot(path: allowedRoot.path, mode: .readWrite)]
+  ))
+  _ = try expectAgentErrorCode("path_outside_root") {
+    _ = try fileEditing.resolveExistingReadablePath(escapedMissingChild)
+  }
+  let revealHandler = AgentRequestHandler(
+    configuration: AgentConfiguration(fileEditing: FileEditingConfiguration(
+      enabled: true,
+      mode: .readWrite,
+      allowedRoots: [FileEditingAllowedRoot(path: allowedRoot.path, mode: .readWrite)]
+    )),
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .denied)),
+    screenshots: FakeScreenshotService(capturedImage: CapturedImage(data: Data([0x52]), width: 1, height: 1)),
+    fileEditing: fileEditing,
+    functionRegistry: FunctionRegistry.standard(),
+    functionState: FunctionRuntimeState(enabledFunctionNames: ["finder.reveal"]),
+    automationPermissions: FakeAutomationPermissionService(status: .authorized),
+    axPermissionCoordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(bundleID: "com.apple.finder", appName: "Finder", mode: .control)
+    ])
+  )
+  let escapedReveal: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "finder_reveal_symlink_escape",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "finder.reveal", args: ["path": .string(escapedMissingChild)])
+    ),
+    to: revealHandler
+  )
+  expect(!escapedReveal.ok, "finder.reveal must reject a missing child beneath an escaping symlink")
+  expectEqual(escapedReveal.error?.code, "path_outside_root", "finder.reveal symlink escape error code")
+
+  let oversizedResult = FunctionResult(value: .string(String(repeating: "x", count: FunctionOutputLimits.maximumEncodedResultBytes + 1)))
+  _ = try expectAgentErrorCode("function_failed") {
+    try FunctionOutputLimits.validate(oversizedResult)
+  }
+
+  do {
+    _ = try FixedAppleScriptExecutor(maximumOutputBytes: 64).runAppleScript("""
+    set outputText to "0123456789"
+    repeat with index from 1 to 8
+      set outputText to outputText & outputText
+    end repeat
+    return outputText
+    """, timeout: 5)
+    expect(false, "AppleScript output over the cap should fail")
+  } catch let error as FixedAppleScriptExecutor.ExecutionError {
+    guard case .outputTooLarge = error else {
+      throw NSError(domain: "ProtocolVerifier", code: 8, userInfo: [NSLocalizedDescriptionKey: "Expected bounded output failure, got \(error.localizedDescription)"])
+    }
+  }
+
+  do {
+    _ = try FixedAppleScriptExecutor(maximumOutputBytes: 1_024).runAppleScript("delay 2\nreturn \"late\"", timeout: 1)
+    expect(false, "AppleScript timeout should terminate the process")
+  } catch let error as FixedAppleScriptExecutor.ExecutionError {
+    guard case .timedOut = error else {
+      throw NSError(domain: "ProtocolVerifier", code: 9, userInfo: [NSLocalizedDescriptionKey: "Expected timeout failure, got \(error.localizedDescription)"])
+    }
+  }
+}
+
+final class RecordingAccessibilityService: AccessibilityServicing, @unchecked Sendable {
+  private let lock = NSLock()
+  private let listedApps: [AXAppPayload]
+  private var recordedTypedPIDs: [Int32?] = []
+
+  init(apps: [AXAppPayload]) {
+    listedApps = apps
+  }
+
+  var typedPIDs: [Int32?] {
+    lock.lock()
+    defer { lock.unlock() }
+    return recordedTypedPIDs
+  }
+
+  func listApps() throws -> AXAppListPayload { AXAppListPayload(apps: listedApps) }
+  func listWindows(query: AXElementQuery) throws -> AXWindowListPayload { AXWindowListPayload(pid: query.pid ?? 0, app: query.appName ?? "Test", windows: []) }
+  func tree(query: AXElementQuery) throws -> AXTreePayload { throw AgentProtocolError.elementNotFound("Unused test tree") }
+  func find(query: AXElementQuery, limit: Int) throws -> AXFindPayload { AXFindPayload(matches: [], truncated: false) }
+  func perform(query: AXElementQuery, action: String) throws -> AXPerformPayload { throw AgentProtocolError.elementNotFound("Unused test perform") }
+  func value(query: AXElementQuery) throws -> AXValuePayload { throw AgentProtocolError.elementNotFound("Unused test value") }
+  func setValue(query: AXElementQuery, value: String) throws -> AXValuePayload { throw AgentProtocolError.elementNotFound("Unused test value") }
+  func typeText(_ text: String, targetPid: Int32?) throws {
+    lock.lock()
+    recordedTypedPIDs.append(targetPid)
+    lock.unlock()
+  }
+  func keyPress(key: String, modifiers: [String], targetPid: Int32?) throws {}
+  func clickAt(x: Double, y: Double, button: String, clickCount: Int, targetPid: Int32?) throws {}
+  func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?, targetPid: Int32?) throws {}
+  func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws {}
+}
+
+final class RecordingAXTargetResolver: AXTargetResolving, @unchecked Sendable {
+  private let lock = NSLock()
+  private let resolution: AXResolvedTarget
+  private let current: Bool
+  private var fallbackRequests: [Bool] = []
+
+  init(resolution: AXResolvedTarget, isCurrent: Bool) {
+    self.resolution = resolution
+    current = isCurrent
+  }
+
+  var frontmostFallbackRequests: [Bool] {
+    lock.lock()
+    defer { lock.unlock() }
+    return fallbackRequests
+  }
+
+  func resolve(params: AgentRequestParams, useFrontmostFallback: Bool) throws -> AXResolvedTarget {
+    lock.lock()
+    fallbackRequests.append(useFrontmostFallback)
+    lock.unlock()
+    return resolution
+  }
+
+  func isStillCurrent(_ resolution: AXResolvedTarget) -> Bool { current }
+}
+
+final class CountingPermissionPrompter: AXPermissionPrompting, @unchecked Sendable {
+  private let lock = NSLock()
+  private let response: AXPermissionPromptResponse
+  private var storedCount = 0
+
+  init(response: AXPermissionPromptResponse) {
+    self.response = response
+  }
+
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedCount
+  }
+
+  func prompt(_ request: AXPermissionPromptRequest, timeout: TimeInterval) -> AXPermissionPromptResponse {
+    lock.lock()
+    storedCount += 1
+    lock.unlock()
+    return response
+  }
+}
+
+final class SequencePermissionPrompter: AXPermissionPrompting, @unchecked Sendable {
+  private let lock = NSLock()
+  private var responses: [AXPermissionPromptResponse]
+
+  init(responses: [AXPermissionPromptResponse]) {
+    self.responses = responses
+  }
+
+  func prompt(_ request: AXPermissionPromptRequest, timeout: TimeInterval) -> AXPermissionPromptResponse {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !responses.isEmpty else { return .notNow }
+    return responses.removeFirst()
+  }
+}
+
+final class LockedCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedValue = 0
+  var value: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedValue
+  }
+  func increment() {
+    lock.lock()
+    storedValue += 1
+    lock.unlock()
+  }
+}
+
+final class LockedBoolean: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedValue: Bool
+  init(_ value: Bool) { storedValue = value }
+  var value: Bool {
+    get {
+      lock.lock()
+      defer { lock.unlock() }
+      return storedValue
+    }
+    set {
+      lock.lock()
+      storedValue = newValue
+      lock.unlock()
+    }
+  }
+}
+
+struct ProbeFunction: MacOSFunction {
+  let name: String
+  let tier: FunctionTier
+  let target: FunctionTarget
+  let counter: LockedCounter
+  let summary = "Guardrail probe"
+  let argSchema: [FunctionArg] = []
+  var catalogTargetBundleID: String? { target.bundleID }
+
+  func makeExecutionPlan(args: [String: JSONValue]) throws -> FunctionExecutionPlan {
+    FunctionExecutionPlan(args: try validateFunctionArgs(args, schema: argSchema), target: target)
+  }
+
+  func run(plan: FunctionExecutionPlan) throws -> FunctionResult {
+    counter.increment()
+    return FunctionResult(value: .object("ran", .bool(true)))
+  }
+}
+
+struct GlobalProbeFunction: MacOSFunction {
+  let name: String
+  let tier: FunctionTier
+  let category: GlobalPermissionCategory
+  let counter: LockedCounter
+  let summary = "Global permission probe"
+  let argSchema: [FunctionArg] = []
+  let catalogTargetBundleID: String? = nil
+
+  func makeExecutionPlan(args: [String: JSONValue]) throws -> FunctionExecutionPlan {
+    FunctionExecutionPlan(
+      args: try validateFunctionArgs(args, schema: argSchema),
+      permissionTarget: category.permissionTarget
+    )
+  }
+
+  func run(plan: FunctionExecutionPlan) throws -> FunctionResult {
+    counter.increment()
+    return FunctionResult(value: .object("ran", .bool(true)))
+  }
+}
+
+struct UnmappedProbeFunction: MacOSFunction {
+  let name = "probe.unmapped"
+  let tier: FunctionTier = .read
+  let counter: LockedCounter
+  let summary = "Unmapped permission probe"
+  let argSchema: [FunctionArg] = []
+  let catalogTargetBundleID: String? = nil
+
+  func makeExecutionPlan(args: [String: JSONValue]) throws -> FunctionExecutionPlan {
+    FunctionExecutionPlan(args: try validateFunctionArgs(args, schema: argSchema))
+  }
+
+  func run(plan: FunctionExecutionPlan) throws -> FunctionResult {
+    counter.increment()
+    return FunctionResult(value: .object("ran", .bool(true)))
+  }
+}
+
+/// Deliberately malformed plans verify that handler-side authorization cannot
+/// be redirected by a buggy or future catalog implementation.
+struct MismatchedPermissionProbeFunction: MacOSFunction {
+  let name: String
+  let tier: FunctionTier
+  let target: FunctionTarget?
+  let declaredPermissionTarget: PermissionTarget
+  let counter: LockedCounter
+  let summary = "Mismatched permission probe"
+  let argSchema: [FunctionArg] = []
+  var catalogTargetBundleID: String? { target?.bundleID }
+
+  func makeExecutionPlan(args: [String: JSONValue]) throws -> FunctionExecutionPlan {
+    FunctionExecutionPlan(
+      args: try validateFunctionArgs(args, schema: argSchema),
+      target: target,
+      permissionTarget: declaredPermissionTarget
+    )
+  }
+
+  func run(plan: FunctionExecutionPlan) throws -> FunctionResult {
+    counter.increment()
+    return FunctionResult(value: .object("ran", .bool(true)))
+  }
+}
+
+final class MutatingAutomationPermissionService: AutomationPermissionServicing, @unchecked Sendable {
+  private let lock = NSLock()
+  private let initial: AutomationPermissionStatus
+  private let afterRequest: AutomationPermissionStatus
+  private let onRequest: @Sendable () -> Void
+  private var storedRequestCount = 0
+
+  init(
+    initial: AutomationPermissionStatus,
+    afterRequest: AutomationPermissionStatus,
+    onRequest: @escaping @Sendable () -> Void = {}
+  ) {
+    self.initial = initial
+    self.afterRequest = afterRequest
+    self.onRequest = onRequest
+  }
+
+  var requestCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedRequestCount
+  }
+
+  func status(forBundleID bundleID: String) -> AutomationPermissionStatus { initial }
+  func requestAccess(forBundleID bundleID: String) -> AutomationPermissionStatus {
+    lock.lock()
+    storedRequestCount += 1
+    lock.unlock()
+    onRequest()
+    return afterRequest
+  }
+}
+
+struct StaticTemplateTargetResolver: TemplateTargetResolving {
+  let targets: [String: FunctionTarget]
+  func resolveTemplateTarget(bundleID: String) -> FunctionTarget? {
+    targets[bundleID.lowercased()]
+  }
 }
 
 func runConfigurationVerifier() throws {  let fileManager = FileManager.default
@@ -843,39 +2127,102 @@ struct FakeAccessibilityService: AccessibilityServicing {
   func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws {}
 }
 
-final class FakeOsascriptService: OsascriptServicing, @unchecked Sendable {
-  let result: OsascriptRunPayload
-  private let lock = NSLock()
-  private var _lastScript: String?
-  private var _lastLanguage: String?
-  private var _lastTimeout: TimeInterval?
+struct FakePermissionPrompter: AXPermissionPrompting {
+  let response: AXPermissionPromptResponse
 
-  var lastScript: String? {
-    lock.lock(); defer { lock.unlock() }
-    return _lastScript
+  func prompt(_ request: AXPermissionPromptRequest, timeout: TimeInterval) -> AXPermissionPromptResponse {
+    response
+  }
+}
+
+struct FakeAXTargetResolver: AXTargetResolving {
+  func resolve(params: AgentRequestParams, useFrontmostFallback: Bool) throws -> AXResolvedTarget {
+    AXResolvedTarget(
+      target: AXPermissionTarget(bundleID: "com.apple.TextEdit", appName: "TextEdit", pid: 4242),
+      pid: 4242,
+      wasResolved: true
+    )
   }
 
-  var lastLanguage: String? {
-    lock.lock(); defer { lock.unlock() }
-    return _lastLanguage
+  func isStillCurrent(_ resolution: AXResolvedTarget) -> Bool {
+    resolution.wasResolved && resolution.pid == 4242
+  }
+}
+
+struct FakeAutomationPermissionService: AutomationPermissionServicing {
+  let status: AutomationPermissionStatus
+
+  func status(forBundleID bundleID: String) -> AutomationPermissionStatus { status }
+  func requestAccess(forBundleID bundleID: String) -> AutomationPermissionStatus { status }
+}
+
+struct FakeApplicationResolver: ApplicationResolving {
+  let runningByBundleID: [String: ApplicationDescriptor]
+  let resolvableByBundleID: [String: ApplicationDescriptor]
+  let nameResolutions: [String: ApplicationNameResolution]
+
+  init(
+    running: [ApplicationDescriptor] = [],
+    installed: [ApplicationDescriptor] = [],
+    names: [String: ApplicationNameResolution] = [:]
+  ) {
+    runningByBundleID = Dictionary(uniqueKeysWithValues: running.map { ($0.bundleID.lowercased(), $0) })
+    var resolvable = Dictionary(uniqueKeysWithValues: installed.map { ($0.bundleID.lowercased(), $0) })
+    for app in running {
+      resolvable[app.bundleID.lowercased()] = app
+    }
+    resolvableByBundleID = resolvable
+    nameResolutions = Dictionary(uniqueKeysWithValues: names.map { ($0.key.lowercased(), $0.value) })
   }
 
-  var lastTimeout: TimeInterval? {
-    lock.lock(); defer { lock.unlock() }
-    return _lastTimeout
+  func resolveApplication(bundleID: String) -> ApplicationDescriptor? {
+    resolvableByBundleID[bundleID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
   }
 
-  init(result: OsascriptRunPayload) {
-    self.result = result
+  func runningApplication(bundleID: String) -> ApplicationDescriptor? {
+    runningByBundleID[bundleID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
   }
 
-  func run(script: String, language: String, timeout: TimeInterval) throws -> OsascriptRunPayload {
-    lock.lock()
-    _lastScript = script
-    _lastLanguage = language
-    _lastTimeout = timeout
-    lock.unlock()
-    return result
+  func resolveApplication(named name: String) -> ApplicationNameResolution {
+    nameResolutions[name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] ?? .notFound
+  }
+}
+
+struct VerifierReadFunction: MacOSFunction {
+  let name = "test.read"
+  let summary = "Verifier read function"
+  let tier: FunctionTier = .read
+  let argSchema = [FunctionArg(name: "message", type: .string, required: true, description: "Message")]
+  let catalogTargetBundleID: String? = nil
+
+  func makeExecutionPlan(args: [String: JSONValue]) throws -> FunctionExecutionPlan {
+    FunctionExecutionPlan(
+      args: try validateFunctionArgs(args, schema: argSchema),
+      permissionTarget: GlobalPermissionCategory.power.permissionTarget
+    )
+  }
+
+  func run(plan: FunctionExecutionPlan) throws -> FunctionResult {
+    FunctionResult(value: .object("message", plan.args["message"]))
+  }
+}
+
+struct VerifierWriteFunction: MacOSFunction {
+  let name = "test.write"
+  let summary = "Verifier write function"
+  let tier: FunctionTier = .write
+  let argSchema: [FunctionArg] = []
+  let catalogTargetBundleID: String? = "com.example.TestApp"
+
+  func makeExecutionPlan(args: [String: JSONValue]) throws -> FunctionExecutionPlan {
+    FunctionExecutionPlan(
+      args: try validateFunctionArgs(args, schema: argSchema),
+      target: FunctionTarget(bundleID: "com.example.TestApp", appName: "Test App", requiresAutomation: false)
+    )
+  }
+
+  func run(plan: FunctionExecutionPlan) throws -> FunctionResult {
+    FunctionResult(value: .object("ran", .bool(true)))
   }
 }
 
@@ -898,6 +2245,7 @@ struct Envelope<T: Decodable>: Decodable {
 struct VerifierErrorPayload: Decodable {
   let code: String
   let message: String
+  let details: JSONValue?
 }
 
 struct EmptyPayload: Decodable {}
@@ -909,6 +2257,9 @@ struct ProtocolVerifier {
       try runProtocolVerifier()
       try runSocketVerifier()
       print("Protocol verifier passed")
+    } catch let error as AgentProtocolError {
+      FileHandle.standardError.write(Data("FAIL [\(error.code)]: \(error.message) details=\(String(describing: error.details))\n".utf8))
+      exit(1)
     } catch {
       FileHandle.standardError.write(Data("FAIL: \(error.localizedDescription)\n".utf8))
       exit(1)
