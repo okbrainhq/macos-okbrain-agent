@@ -9,7 +9,7 @@ struct MenuBarView: View {
     Button("Show Window") {
       openWindow(id: WindowID.main)
       NSApp.setActivationPolicy(.regular)
-      NSApp.activate(ignoringOtherApps: true)
+      NSApp.activate()
     }
 
     if !store.pendingAXPermissionRequests.isEmpty {

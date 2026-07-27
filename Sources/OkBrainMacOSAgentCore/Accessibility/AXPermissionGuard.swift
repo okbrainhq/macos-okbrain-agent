@@ -519,10 +519,10 @@ public final class SystemAXPermissionPrompter: AXPermissionPrompting, @unchecked
     // present the alert below — it may appear behind other windows but the
     // user can reach it via the Dock/menu bar instead of silently timing out.
     if !NSApp.isActive {
-      NSApp.activate(ignoringOtherApps: true)
+      NSApp.activate()
     }
     if !NSApp.isActive {
-      NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+      NSRunningApplication.current.activate()
     }
 
     let alert = NSAlert()
