@@ -1,3 +1,4 @@
+import AppKit
 import OkBrainMacOSAgentCore
 import SwiftUI
 
@@ -104,17 +105,18 @@ struct OverviewView: View {
 
       HStack(spacing: 10) {
         Button {
-          store.requestScreenRecordingAccess()
+          openScreenRecordingSettings()
         } label: {
           Label("Screen Recording", systemImage: "rectangle.inset.filled.and.person.filled")
         }
         .buttonStyle(.borderedProminent)
 
         Button {
-          store.requestAccessibilityAccess()
+          openAccessibilitySettings()
         } label: {
           Label("Accessibility", systemImage: "figure")
         }
+        .buttonStyle(.borderedProminent)
       }
 
       if let errorMessage = store.socketSnapshot.errorMessage {
@@ -132,6 +134,16 @@ struct OverviewView: View {
 
   private var fileEditingLabel: String {
     store.configuration.fileEditing.enabled ? "Enabled • \(store.configuration.fileEditing.mode.rawValue)" : "Disabled"
+  }
+
+  private func openScreenRecordingSettings() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+    NSWorkspace.shared.open(url)
+  }
+
+  private func openAccessibilitySettings() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
+    NSWorkspace.shared.open(url)
   }
 }
 
