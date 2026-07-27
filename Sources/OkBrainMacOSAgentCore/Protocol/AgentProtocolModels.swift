@@ -96,6 +96,12 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
   public var rationale: String?
   public var exampleScript: String?
 
+  // Sandboxed shell params
+  public var command: String?
+  public var cwd: String?
+  public var env: [String: String]?
+  public var timeoutSeconds: Int?
+
 
   public init(
     mode: String? = nil,
@@ -158,7 +164,11 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     name: String? = nil,
     description: String? = nil,
     rationale: String? = nil,
-    exampleScript: String? = nil
+    exampleScript: String? = nil,
+    command: String? = nil,
+    cwd: String? = nil,
+    env: [String: String]? = nil,
+    timeoutSeconds: Int? = nil
   ) {
     self.mode = mode
     self.format = format
@@ -221,6 +231,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     self.description = description
     self.rationale = rationale
     self.exampleScript = exampleScript
+    self.command = command
+    self.cwd = cwd
+    self.env = env
+    self.timeoutSeconds = timeoutSeconds
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -285,6 +299,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     case description
     case rationale
     case exampleScript
+    case command
+    case cwd
+    case env
+    case timeoutSeconds
   }
 
   public init(from decoder: Decoder) throws {
@@ -349,6 +367,10 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     description = try container.decodeIfPresent(String.self, forKey: .description)
     rationale = try container.decodeIfPresent(String.self, forKey: .rationale)
     exampleScript = try container.decodeIfPresent(String.self, forKey: .exampleScript)
+    command = try container.decodeIfPresent(String.self, forKey: .command)
+    cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+    env = try container.decodeIfPresent([String: String].self, forKey: .env)
+    timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
 
     if let numericWindowID = try? container.decodeIfPresent(UInt32.self, forKey: .windowId) {
       windowId = numericWindowID
@@ -671,5 +693,86 @@ public struct FileSearchMatchPayload: Codable, Equatable, Sendable {
     self.file = file
     self.line = line
     self.text = text
+  }
+}
+
+public struct ShellExecPayload: Codable, Equatable, Sendable {
+  public let command: String
+  public let cwd: String
+  public let exitCode: Int32
+  public let stdout: String
+  public let stderr: String
+  public let timedOut: Bool
+  public let outputTruncated: Bool
+
+  public init(
+    command: String,
+    cwd: String,
+    exitCode: Int32,
+    stdout: String,
+    stderr: String,
+    timedOut: Bool,
+    outputTruncated: Bool
+  ) {
+    self.command = command
+    self.cwd = cwd
+    self.exitCode = exitCode
+    self.stdout = stdout
+    self.stderr = stderr
+    self.timedOut = timedOut
+    self.outputTruncated = outputTruncated
+  }
+}
+
+public struct ShellStatusPayload: Codable, Equatable, Sendable {
+  public let enabled: Bool
+  public let sandboxAvailable: Bool
+  public let networkPolicy: String
+  public let trustedExecPrefixes: [String]
+  public let fileRules: [ShellFileRuleSummary]
+  public let blockSummary: [String]
+  public let capabilityRules: [ShellCapabilityRuleSummary]
+  public let pendingCapabilityCount: Int
+
+  public init(
+    enabled: Bool,
+    sandboxAvailable: Bool,
+    networkPolicy: String,
+    trustedExecPrefixes: [String],
+    fileRules: [ShellFileRuleSummary],
+    blockSummary: [String],
+    capabilityRules: [ShellCapabilityRuleSummary] = [],
+    pendingCapabilityCount: Int = 0
+  ) {
+    self.enabled = enabled
+    self.sandboxAvailable = sandboxAvailable
+    self.networkPolicy = networkPolicy
+    self.trustedExecPrefixes = trustedExecPrefixes
+    self.fileRules = fileRules
+    self.blockSummary = blockSummary
+    self.capabilityRules = capabilityRules
+    self.pendingCapabilityCount = pendingCapabilityCount
+  }
+}
+
+public struct ShellCapabilityRuleSummary: Codable, Equatable, Sendable {
+  public let kind: ShellCapabilityKind
+  public let value: String
+  public let mode: ShellCapabilityMode
+
+  public init(kind: ShellCapabilityKind, value: String, mode: ShellCapabilityMode) {
+    self.kind = kind
+    self.value = value
+    self.mode = mode
+  }
+}
+
+public struct ShellFileRuleSummary: Codable, Equatable, Sendable {
+  public let path: String
+  public let mode: FileEditingMode
+
+  public init(path: String, mode: FileEditingMode) {
+    self.path = path
+    self.mode = mode
   }
 }

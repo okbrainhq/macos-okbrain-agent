@@ -52,6 +52,11 @@ PATCH_VERIFY_BINARY="$VERIFY_DIR/verify_patch_engine"
 swiftc -target "$SWIFT_TARGET" -module-cache-path "$CLANG_MODULE_CACHE_PATH" "${CORE_SOURCES[@]}" "$ROOT_DIR/scripts/verify_patch_engine.swift" -o "$PATCH_VERIFY_BINARY"
 "$PATCH_VERIFY_BINARY"
 
+section "Shell sandbox verifier"
+SHELL_VERIFY_BINARY="$VERIFY_DIR/verify_shell"
+swiftc -target "$SWIFT_TARGET" -module-cache-path "$CLANG_MODULE_CACHE_PATH" "${CORE_SOURCES[@]}" "$ROOT_DIR/scripts/verify_shell.swift" -o "$SHELL_VERIFY_BINARY"
+"$SHELL_VERIFY_BINARY"
+
 section "Shell syntax checks"
 while IFS= read -r script; do
   bash -n "$script"

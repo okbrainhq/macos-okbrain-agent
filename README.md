@@ -2,7 +2,7 @@
 
 A macOS menu-bar agent that exposes screenshot capture, accessibility (AX) GUI control with per-app guardrails, a curated macOS function catalog, and toggleable file editing over a local Unix domain socket. The Brain server connects to this socket via SSH forwarding and exchanges `OKB1` binary frames.
 
-See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md), [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md), [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md), and [`protocol/07-macos-agent-guardrails-and-functions.md`](protocol/07-macos-agent-guardrails-and-functions.md) for the protocol specifications. Raw `osascript.run` was retired and is no longer a protocol capability.
+See [`protocol/01-macos-agent-ssh-socks-protocol.md`](protocol/01-macos-agent-ssh-socks-protocol.md), [`protocol/02-macos-agent-file-editing.md`](protocol/02-macos-agent-file-editing.md), [`protocol/04-macos-agent-accessibility-api.md`](protocol/04-macos-agent-accessibility-api.md), [`protocol/07-macos-agent-guardrails-and-functions.md`](protocol/07-macos-agent-guardrails-and-functions.md), and [`protocol/08-macos-agent-sandboxed-shell.md`](protocol/08-macos-agent-sandboxed-shell.md) for the protocol specifications. Raw `osascript.run` was retired and is no longer a protocol capability.
 
 ## Requirements
 
@@ -63,6 +63,18 @@ Functions that use Apple Events preflight macOS **Automation** permission for th
 File editing is disabled by default. Enable or disable it from the app's **Settings → File Editing** switch.
 
 Supported actions are `workspace.describe`, `fs.stat`, `fs.list`, `fs.read`, `fs.write`, `fs.patch`, and `fs.search`. File access is default-deny: enable **Settings → File Editing**, then add folder rules in **File Permissions**. A read or write rule applies to that folder and all nested paths unless a more specific child-folder rule overrides it. Requests provide an absolute `path`; access is allowed only when that path is inside an enabled permission rule. `fs.search` accepts either a directory or a single file path, symlink escapes are denied by default, and writes use SHA conflict checks plus atomic replacement.
+
+## Sandboxed Shell (Phases 1–4)
+
+Shell access has its own **Shell Access** sidebar tab and **Settings → Shell Access** switch (default **off**, independent of File Editing). When Shell Access is enabled with at least one folder rule, the agent serves `sh.exec` and `sh.status`. `sh.exec` runs a command string inside a per-execution Seatbelt (`sandbox-exec`) sandbox derived from the live folder rules; `sh.status` reports the effective policy. The Shell Access tab shows the same default-deny folder-rule manager as the File Permissions tab — the sandbox is scoped to those shared rules.
+
+- **File writes are kernel default-deny** outside read-write rules and build temp dirs (`TMPDIR`, `/private/tmp`). Read-only rules can be read but not written.
+- **An immutable Block base** always denies writes to `/System`, `/private/etc`, `/private/var/db`, etc., all TCC/system-policy databases, `~/.ssh` and `~/Library/Keychains`, plus `authorization-right-obtain`, `nvram*`, `sysctl-write`, mount/unmount, setugid, and privileged Mach services. No rule can relax these.
+- **Three-tier pre-flight classification** (defense-in-depth): dangerous invocations (`rm -rf /`, `curl|sh`, `dd of=/dev/…`) and privileged tools (`sudo`, `su`, `launchctl`) are hard **Block** (`shell_permission_blocked`); out-of-tree absolute-path executables and inline `osascript … tell application "X"` automation are **Ask** — they prompt locally (Allow Once / Always Allow / Not Now) and return `shell_permission_required` until approved; trusted prefixes and in-rule binaries run silently.
+- **Shell Access UI + audit.** The Shell Access tab manages capability rules (process-exec path prefixes, Apple-event targets), resolves the pending-request inbox, and shows a bounded audit log (command, cwd, classification, decision, exit code — never output contents).
+- **Network is fully open in v1** and reads/exec are open at the kernel level; exec scoping is agent-enforced. See [`protocol/08-macos-agent-sandboxed-shell.md`](protocol/08-macos-agent-sandboxed-shell.md) §13 for the as-built notes and the remaining Brain-routing phase.
+
+`sh.exec` params: `command` (required), `cwd` (required, must resolve inside a read-write rule), `env` (allow-listed keys only), `timeoutSeconds` (capped). Output is capped at 1 MiB. Error codes: `shell_permission_required`, `shell_permission_blocked`, `shell_denied_by_sandbox`, `shell_timeout`, `shell_output_limit`.
 
 ## Testing
 

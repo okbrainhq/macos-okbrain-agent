@@ -4,6 +4,7 @@ enum AppSection: String, CaseIterable, Hashable, Identifiable {
   case overview
   case computerUse
   case filePermissions
+  case shellAccess
 
   var id: String {
     rawValue
@@ -17,6 +18,8 @@ enum AppSection: String, CaseIterable, Hashable, Identifiable {
       "Computer Use"
     case .filePermissions:
       "File Permissions"
+    case .shellAccess:
+      "Shell Access"
     }
   }
 
@@ -27,7 +30,9 @@ enum AppSection: String, CaseIterable, Hashable, Identifiable {
     case .computerUse:
       "App & global access grants and the curated function catalog."
     case .filePermissions:
-      "Default-deny folder rules for file editing."
+      "Default-deny folder rules for file editing and sandboxed shell."
+    case .shellAccess:
+      "Sandboxed shell toggle, folder rules, capability grants, and audit log."
     }
   }
 
@@ -39,6 +44,8 @@ enum AppSection: String, CaseIterable, Hashable, Identifiable {
       "hand.tap.fill"
     case .filePermissions:
       "folder.badge.gearshape"
+    case .shellAccess:
+      "terminal"
     }
   }
 }

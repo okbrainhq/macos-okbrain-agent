@@ -34,6 +34,8 @@ struct DetailView: View {
         ComputerUseView()
       case .filePermissions:
         PermissionRulesView()
+      case .shellAccess:
+        ShellAccessView()
       }
 
       Spacer(minLength: 0)

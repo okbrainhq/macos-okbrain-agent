@@ -37,11 +37,16 @@ final class AgentRuntimeStore: ObservableObject {
   private static let preventIdleSleepDefaultsKey = "preventIdleSleepEnabled"
   private static let fileEditingEnabledDefaultsKey = "fileEditingEnabled"
   private static let filePermissionRulesDefaultsKey = "filePermissionRules"
+  private static let shellAccessEnabledDefaultsKey = "shellAccessEnabled"
   private nonisolated static let remoteControlAPIsEnabledDefaultsKey = "remoteControlAPIsEnabled"
   private nonisolated static let axPermissionStateDefaultsKey = "axPermissionState"
   private nonisolated static let functionRuntimeStateDefaultsKey = "functionRuntimeState"
+  private nonisolated static let shellCapabilityStateDefaultsKey = "shellCapabilityState"
   private nonisolated static let axPermissionStateChangedNotification = Notification.Name("OkBrainAXPermissionStateChanged")
   private nonisolated static let functionRuntimeStateChangedNotification = Notification.Name("OkBrainFunctionRuntimeStateChanged")
+  private nonisolated static let shellCapabilityStateChangedNotification = Notification.Name("OkBrainShellCapabilityStateChanged")
+  private nonisolated static let shellAuditEventNotification = Notification.Name("OkBrainShellAuditEvent")
+  private static let shellAuditLimit = 200
   private static let preventIdleSleepReason = "OkBrain Agent is running and ready for remote screenshots."
 
   @Published private(set) var configuration: AgentConfiguration
@@ -53,6 +58,9 @@ final class AgentRuntimeStore: ObservableObject {
   @Published private(set) var filePermissionRules: [FileEditingAllowedRoot]
   @Published private(set) var permissionRules: [AXAppPermissionRule]
   @Published private(set) var pendingAXPermissionRequests: [AXPendingPermissionRequest]
+  @Published private(set) var shellCapabilityRules: [ShellCapabilityRule]
+  @Published private(set) var pendingShellCapabilityRequests: [ShellPendingCapabilityRequest]
+  @Published private(set) var shellAuditEvents: [ShellAuditEvent]
   @Published private(set) var functionCatalog: [FunctionCatalogEntry]
   @Published private(set) var functionProposals: [FunctionProposal]
   @Published private(set) var storedFunctionTemplates: [StoredFunctionTemplate]
@@ -76,12 +84,21 @@ final class AgentRuntimeStore: ObservableObject {
       applyFileEditingSetting()
     }
   }
+  @Published var shellAccessEnabled: Bool {
+    didSet {
+      guard shellAccessEnabled != oldValue else { return }
+      UserDefaults.standard.set(shellAccessEnabled, forKey: Self.shellAccessEnabledDefaultsKey)
+      applyShellAccessSetting()
+    }
+  }
   @Published private(set) var idleSleepPrevention: IdleSleepPreventionSnapshot
 
   private let permissionService = SystemPermissionService()
   private let screenshotService = ScreenCaptureKitScreenshotService()
   private let idleSleepPreventer = IdleSleepPreventer()
   private let axPermissionCoordinator: AXPermissionCoordinator
+  private let shellCapabilityCoordinator: ShellCapabilityCoordinator
+  private let shellExecutionService: ShellExecutionService
   private let functionRuntimeState: FunctionRuntimeState
   private let functionRegistry: FunctionRegistry
   private var requestHandler: AgentRequestHandler
@@ -93,20 +110,39 @@ final class AgentRuntimeStore: ObservableObject {
     UserDefaults.standard.register(defaults: [
       Self.preventIdleSleepDefaultsKey: true,
       Self.fileEditingEnabledDefaultsKey: false,
+      Self.shellAccessEnabledDefaultsKey: false,
       Self.remoteControlAPIsEnabledDefaultsKey: true
     ])
 
     let preventIdleSleepEnabled = UserDefaults.standard.bool(forKey: Self.preventIdleSleepDefaultsKey)
     let fileEditingEnabled = UserDefaults.standard.bool(forKey: Self.fileEditingEnabledDefaultsKey)
+    let shellAccessEnabled = UserDefaults.standard.bool(forKey: Self.shellAccessEnabledDefaultsKey)
     let remoteControlAPIsEnabled = UserDefaults.standard.bool(forKey: Self.remoteControlAPIsEnabledDefaultsKey)
     let filePermissionRules = Self.loadFilePermissionRules()
     let axState = Self.loadAXPermissionState()
     let functionStateSnapshot = Self.loadFunctionRuntimeState()
+    let shellState = Self.loadShellCapabilityState()
     let axCoordinator = AXPermissionCoordinator(
       rules: axState.rules,
       pendingRequests: axState.pendingRequests,
       onStateChange: { snapshot in
         Self.persistAXPermissionState(snapshot)
+      }
+    )
+    let shellCoordinator = ShellCapabilityCoordinator(
+      rules: shellState.rules,
+      pendingRequests: shellState.pendingRequests,
+      onStateChange: { snapshot in
+        Self.persistShellCapabilityState(snapshot)
+      }
+    )
+    // The audit sink posts a notification (observed on the main actor) so the
+    // bounded in-memory audit log can be published without capturing `self`
+    // before initialization completes.
+    let shellService = ShellExecutionService(
+      capabilityCoordinator: shellCoordinator,
+      auditSink: { event in
+        NotificationCenter.default.post(name: AgentRuntimeStore.shellAuditEventNotification, object: event)
       }
     )
     let functionRuntimeState = FunctionRuntimeState(
@@ -120,19 +156,26 @@ final class AgentRuntimeStore: ObservableObject {
     let functionRegistry = FunctionRegistry.standard()
     let configuration = AgentConfiguration.current(
       fileEditingEnabled: fileEditingEnabled,
-      filePermissionRules: filePermissionRules
+      filePermissionRules: filePermissionRules,
+      shellAccessEnabled: shellAccessEnabled
     )
 
     self.configuration = configuration
     self.preventIdleSleepEnabled = preventIdleSleepEnabled
     self.fileEditingEnabled = fileEditingEnabled
+    self.shellAccessEnabled = shellAccessEnabled
     self.remoteControlAPIsEnabled = remoteControlAPIsEnabled
     self.filePermissionRules = filePermissionRules
     self.axPermissionCoordinator = axCoordinator
+    self.shellCapabilityCoordinator = shellCoordinator
+    self.shellExecutionService = shellService
     self.functionRuntimeState = functionRuntimeState
     self.functionRegistry = functionRegistry
     self.permissionRules = axState.rules
     self.pendingAXPermissionRequests = axState.pendingRequests
+    self.shellCapabilityRules = shellState.rules
+    self.pendingShellCapabilityRequests = shellState.pendingRequests
+    self.shellAuditEvents = []
     self.functionProposals = functionStateSnapshot.proposals
     self.storedFunctionTemplates = functionStateSnapshot.templates
     self.functionCatalog = functionRegistry.localCatalogEntries(state: functionRuntimeState)
@@ -150,6 +193,7 @@ final class AgentRuntimeStore: ObservableObject {
       functionRegistry: functionRegistry,
       functionState: functionRuntimeState,
       axPermissionCoordinator: axCoordinator,
+      shellExecution: shellService,
       remoteControlEnabled: { UserDefaults.standard.bool(forKey: Self.remoteControlAPIsEnabledDefaultsKey) }
     )
 
@@ -223,6 +267,21 @@ final class AgentRuntimeStore: ObservableObject {
     ) { [weak self] _ in
       Task { @MainActor [weak self] in self?.refreshControlStatePresentation() }
     })
+    observers.append(NotificationCenter.default.addObserver(
+      forName: Self.shellCapabilityStateChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      Task { @MainActor [weak self] in self?.refreshControlStatePresentation() }
+    })
+    observers.append(NotificationCenter.default.addObserver(
+      forName: Self.shellAuditEventNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] notification in
+      guard let event = notification.object as? ShellAuditEvent else { return }
+      Task { @MainActor [weak self] in self?.appendShellAuditEvent(event) }
+    })
   }
 
   private func refreshControlStatePresentation() {
@@ -230,10 +289,21 @@ final class AgentRuntimeStore: ObservableObject {
     permissionRules = axSnapshot.rules
     pendingAXPermissionRequests = axSnapshot.pendingRequests
 
+    let shellSnapshot = shellCapabilityCoordinator.snapshot()
+    shellCapabilityRules = shellSnapshot.rules
+    pendingShellCapabilityRequests = shellSnapshot.pendingRequests
+
     let functionSnapshot = functionRuntimeState.snapshot()
     functionProposals = functionSnapshot.proposals
     storedFunctionTemplates = functionSnapshot.templates
     functionCatalog = functionRegistry.localCatalogEntries(state: functionRuntimeState)
+  }
+
+  private func appendShellAuditEvent(_ event: ShellAuditEvent) {
+    shellAuditEvents.insert(event, at: 0)
+    if shellAuditEvents.count > Self.shellAuditLimit {
+      shellAuditEvents.removeLast(shellAuditEvents.count - Self.shellAuditLimit)
+    }
   }
 
   func restartSocket() {
@@ -302,6 +372,19 @@ final class AgentRuntimeStore: ObservableObject {
     }
   }
 
+  private func applyShellAccessSetting() {
+    let nextConfiguration = configuration.withShellAccessEnabled(shellAccessEnabled)
+    guard nextConfiguration != configuration else { return }
+
+    configuration = nextConfiguration
+    requestHandler = makeRequestHandler(configuration: nextConfiguration)
+    if isAgentRuntimeActive {
+      restartSocket()
+    } else {
+      socketSnapshot = SocketServerSnapshot(status: .stopped, socketPath: nextConfiguration.socketPath)
+    }
+  }
+
   // MARK: - Explicit Observe / Control permissions
 
   func upsertPermissionRule(target: PermissionTarget, mode: AXAppPermissionMode) {
@@ -329,6 +412,33 @@ final class AgentRuntimeStore: ObservableObject {
 
   func resolvePendingAXPermissionRequest(id: UUID, resolution: AXPendingPermissionResolution) {
     _ = axPermissionCoordinator.resolvePendingRequest(id: id, resolution: resolution)
+    refreshControlStatePresentation()
+  }
+
+  // MARK: - Shell capability permissions
+
+  func upsertShellCapabilityRule(kind: ShellCapabilityKind, value: String, mode: ShellCapabilityMode) {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    let nextRules = shellCapabilityRules.filter { !($0.kind == kind && $0.value == trimmed) }
+      + [ShellCapabilityRule(kind: kind, value: trimmed, mode: mode)]
+    shellCapabilityCoordinator.replaceRules(nextRules)
+    refreshControlStatePresentation()
+  }
+
+  func updateShellCapabilityRule(kind: ShellCapabilityKind, value: String, mode: ShellCapabilityMode) {
+    upsertShellCapabilityRule(kind: kind, value: value, mode: mode)
+  }
+
+  func removeShellCapabilityRules(ids: Set<String>) {
+    guard !ids.isEmpty else { return }
+    let nextRules = shellCapabilityRules.filter { !ids.contains($0.id) }
+    shellCapabilityCoordinator.replaceRules(nextRules)
+    refreshControlStatePresentation()
+  }
+
+  func resolvePendingShellCapabilityRequest(id: UUID, resolution: ShellPendingResolution) {
+    _ = shellCapabilityCoordinator.resolvePendingRequest(id: id, resolution: resolution)
     refreshControlStatePresentation()
   }
 
@@ -409,6 +519,7 @@ final class AgentRuntimeStore: ObservableObject {
       functionRegistry: functionRegistry,
       functionState: functionRuntimeState,
       axPermissionCoordinator: axPermissionCoordinator,
+      shellExecution: shellExecutionService,
       remoteControlEnabled: { UserDefaults.standard.bool(forKey: Self.remoteControlAPIsEnabledDefaultsKey) }
     )
   }
@@ -481,6 +592,21 @@ final class AgentRuntimeStore: ObservableObject {
       UserDefaults.standard.set(data, forKey: axPermissionStateDefaultsKey)
     }
     NotificationCenter.default.post(name: axPermissionStateChangedNotification, object: nil)
+  }
+
+  private nonisolated static func loadShellCapabilityState() -> ShellCapabilityStateSnapshot {
+    guard let data = UserDefaults.standard.data(forKey: shellCapabilityStateDefaultsKey),
+          let state = try? JSONDecoder().decode(ShellCapabilityStateSnapshot.self, from: data) else {
+      return ShellCapabilityStateSnapshot(rules: [], pendingRequests: [])
+    }
+    return state
+  }
+
+  private nonisolated static func persistShellCapabilityState(_ state: ShellCapabilityStateSnapshot) {
+    if let data = try? JSONEncoder().encode(state) {
+      UserDefaults.standard.set(data, forKey: shellCapabilityStateDefaultsKey)
+    }
+    NotificationCenter.default.post(name: shellCapabilityStateChangedNotification, object: nil)
   }
 
   private nonisolated static func loadFunctionRuntimeState() -> FunctionRuntimeStateSnapshot {
