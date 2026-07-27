@@ -76,7 +76,7 @@ func verifyProfileGenerator() {
   expect(profile.contains("(subpath \"/Library/Application Support/com.apple.TCC\")"), "block TCC access")
   expect(profile.contains("(subpath \"/Users/demo/.ssh\")"), "block ~/.ssh access")
   expect(profile.contains("(deny authorization-right-obtain)"), "block authorization-right-obtain")
-  expect(profile.contains("(deny sysctl-write)"), "block sysctl-write")
+  expect(!profile.contains("(deny sysctl-write)"), "sysctl-write is NOT denied (breaks sysctlbyname reads / Swift target detection)")
   expect(profile.contains("(deny file-write-setugid)"), "block setugid")
   expect(profile.contains("(global-name \"com.apple.authd\")"), "block privileged mach service")
 

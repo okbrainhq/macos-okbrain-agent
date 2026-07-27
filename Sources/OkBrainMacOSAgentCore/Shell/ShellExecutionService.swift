@@ -268,7 +268,24 @@ public final class ShellExecutionService: ShellExecuting, @unchecked Sendable {
 
     let exitCode = process.terminationStatus
 
-    // 5. Detect an unanticipated kernel denial (EPERM from sandboxd). This is a
+    // 5a. Detect a nested sandbox failure: macOS refuses sandbox_apply from
+    // inside any deny-based sandbox profile, so tools that spawn their own
+    // sandbox-exec (e.g. SwiftPM) fail with "sandbox_apply: Operation not
+    // permitted". Surface actionable guidance instead of a generic denial.
+    let combinedOutput = capturedStderr + "\n" + capturedStdout
+    if exitCode != 0, combinedOutput.contains("sandbox_apply: Operation not permitted") {
+      audit(command: command, cwd: resolvedCwd, classification: classificationLabel, decision: .deniedBySandbox, exitCode: exitCode)
+      throw AgentProtocolError.shellDeniedBySandbox(
+        "A process tried to apply its own sandbox (nested sandbox_apply), which macOS forbids inside the agent shell's deny-based sandbox profile. Re-run the tool with its built-in sandboxing disabled (e.g. `swift build --disable-sandbox`, `swift test --disable-sandbox`); the agent shell sandbox still confines the command.",
+        details: .object(
+          "operation", .string("nested-sandbox-apply"),
+          "command", .string(command),
+          "exitCode", .number(Double(exitCode))
+        )
+      )
+    }
+
+    // 5b. Detect an unanticipated kernel denial (EPERM from sandboxd). This is a
     // best-effort parse; v1 ships pre-flight classification as the primary gate.
     if exitCode != 0, let deniedOp = deniedSandboxOperation(in: capturedStderr) {
       audit(command: command, cwd: resolvedCwd, classification: classificationLabel, decision: .deniedBySandbox, exitCode: exitCode)
@@ -304,7 +321,7 @@ public final class ShellExecutionService: ShellExecuting, @unchecked Sendable {
       blockSummary: [
         "file-write denied: " + SBPLProfileGenerator.blockWritePrefixes.joined(separator: ", "),
         "TCC/system-policy read-write denied: " + SBPLProfileGenerator.blockReadWritePrefixes.joined(separator: ", "),
-        "denied ops: authorization-right-obtain, nvram*, sysctl-write, file-write-mount/unmount, file-write-setugid",
+        "denied ops: authorization-right-obtain, nvram*, file-write-mount/unmount, file-write-setugid",
         "denied mach services: " + SBPLProfileGenerator.blockedMachServices.joined(separator: ", ")
       ],
       capabilityRules: (capabilitySnapshot?.rules ?? []).map {
