@@ -120,7 +120,10 @@ public struct SBPLProfileGenerator: Sendable {
     }
     lines.append("(deny authorization-right-obtain)")
     lines.append("(deny nvram*)")
-    lines.append("(deny sysctl-write)")
+    // NOTE: sysctl-write is deliberately NOT denied. Seatbelt also blocks the
+    // sysctl reads behind sysctlbyname() under this deny, which breaks the
+    // Swift driver's host-OS detection ("Swift requires a minimum deployment
+    // target of macOS 10.9.0" / SwiftPM "Failed to parse target info").
     lines.append("(deny file-write-mount)")
     lines.append("(deny file-write-unmount)")
     lines.append("(deny file-write-setugid)")
