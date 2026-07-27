@@ -363,18 +363,6 @@ final class AgentRuntimeStore: ObservableObject {
     refreshControlStatePresentation()
   }
 
-  // MARK: - System permissions
-
-  func requestScreenRecordingAccess() {
-    _ = permissionService.requestScreenRecordingAccess()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refreshPermissions() }
-  }
-
-  func requestAccessibilityAccess() {
-    _ = permissionService.requestAccessibilityAccess(prompt: true)
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.refreshPermissions() }
-  }
-
   // MARK: - Screenshot probe
 
   func captureFullScreenProbe() {
