@@ -78,6 +78,30 @@ struct OverviewView: View {
         }
       }
 
+      GroupBox("Sleep") {
+        VStack(alignment: .leading, spacing: 10) {
+          HStack {
+            Toggle(isOn: $store.preventIdleSleepEnabled) {
+              Text("Prevent Idle Sleep").font(.headline)
+            }
+            .toggleStyle(.switch)
+            Spacer(minLength: 12)
+            StatusPill(
+              title: store.idleSleepPrevention.state.label,
+              systemImage: store.idleSleepPrevention.state.systemImage,
+              tint: store.idleSleepPrevention.state.tint
+            )
+          }
+          Text("Keeps your Mac awake while the agent runs. The display can still sleep.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+          if let errorMessage = store.idleSleepPrevention.errorMessage {
+            Text(errorMessage).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+          }
+        }
+        .padding(4)
+      }
+
       HStack(spacing: 10) {
         Button {
           store.requestScreenRecordingAccess()
@@ -108,5 +132,33 @@ struct OverviewView: View {
 
   private var fileEditingLabel: String {
     store.configuration.fileEditing.enabled ? "Enabled • \(store.configuration.fileEditing.mode.rawValue)" : "Disabled"
+  }
+}
+
+private extension IdleSleepPreventionSnapshot.State {
+  var label: String {
+    switch self {
+    case .disabled: "Disabled"
+    case .inactive: "Inactive"
+    case .active: "Active"
+    case .failed: "Failed"
+    }
+  }
+
+  var systemImage: String {
+    switch self {
+    case .disabled: "pause.circle"
+    case .inactive: "clock"
+    case .active: "checkmark.circle.fill"
+    case .failed: "xmark.octagon.fill"
+    }
+  }
+
+  var tint: Color {
+    switch self {
+    case .disabled, .inactive: .secondary
+    case .active: .green
+    case .failed: .red
+    }
   }
 }
