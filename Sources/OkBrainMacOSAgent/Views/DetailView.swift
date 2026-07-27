@@ -5,19 +5,24 @@ struct DetailView: View {
 
   private enum Layout {
     static let defaultPadding: CGFloat = 32
-    static let filePermissionsTopPadding: CGFloat = 80
   }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
-      HStack(spacing: 12) {
+      HStack(alignment: .top, spacing: 12) {
         Image(systemName: section.systemImage)
           .font(.title2)
           .foregroundStyle(.secondary)
           .frame(width: 30)
+          .padding(.top, 4)
 
-        Text(section.title)
-          .font(.largeTitle.weight(.semibold))
+        VStack(alignment: .leading, spacing: 2) {
+          Text(section.title)
+            .font(.largeTitle.weight(.semibold))
+          Text(section.subtitle)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        }
       }
 
       Divider()
@@ -25,25 +30,17 @@ struct DetailView: View {
       switch section {
       case .overview:
         OverviewView()
-      case .screenshot:
-        ScreenshotView()
+      case .computerUse:
+        ComputerUseView()
       case .filePermissions:
         PermissionRulesView()
       case .settings:
         SettingsView()
-      case .diagnostics:
-        DiagnosticsView()
       }
 
       Spacer(minLength: 0)
     }
-    .padding(.horizontal, Layout.defaultPadding)
-    .padding(.top, detailTopPadding)
-    .padding(.bottom, Layout.defaultPadding)
+    .padding(Layout.defaultPadding)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-  }
-
-  private var detailTopPadding: CGFloat {
-    section == .filePermissions ? Layout.filePermissionsTopPadding : Layout.defaultPadding
   }
 }
