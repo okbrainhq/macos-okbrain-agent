@@ -170,10 +170,10 @@ public final class SystemShellPermissionPrompter: ShellPermissionPrompting, @unc
       NSApp.setActivationPolicy(.regular)
     }
     if !NSApp.isActive {
-      NSApp.activate(ignoringOtherApps: true)
+      NSApp.activate()
     }
     if !NSApp.isActive {
-      NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+      NSRunningApplication.current.activate()
     }
 
     let alert = NSAlert()

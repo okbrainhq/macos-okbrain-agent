@@ -90,15 +90,15 @@ public final class SystemApplicationResolver: ApplicationResolving, @unchecked S
     }
 
     // A non-running name query may only return false after we bind that name
-    // to one installed bundle ID. `fullPath(forApplication:)` is a Launch
-    // Services lookup; verify its display/bundle filename is an exact match so
-    // a fuzzy Launch Services result cannot select an unintended target.
-    guard let path = NSWorkspace.shared.fullPath(forApplication: name),
-          let bundle = Bundle(path: path),
+    // to one installed bundle ID. Search standard application directories;
+    // verify the display/bundle filename is an exact match so a fuzzy result
+    // cannot select an unintended target.
+    guard let url = Self.applicationURL(forName: name),
+          let bundle = Bundle(url: url),
           let bundleID = bundle.bundleIdentifier else {
       return .notFound
     }
-    let url = URL(fileURLWithPath: path)
+    let path = url.path
     let displayName = FileManager.default.displayName(atPath: path)
     let fileName = url.deletingPathExtension().lastPathComponent
     guard displayName.caseInsensitiveCompare(name) == .orderedSame
@@ -118,6 +118,25 @@ public final class SystemApplicationResolver: ApplicationResolving, @unchecked S
         frontmost: app.isActive
       )
     }
+  }
+
+  /// Searches standard application directories for an app matching `name`.
+  private static func applicationURL(forName name: String) -> URL? {
+    let fileName = name.hasSuffix(".app") ? name : "\(name).app"
+    let searchDirs = [
+      "/Applications",
+      "/System/Applications",
+      "/System/Applications/Utilities",
+      "/Applications/Utilities",
+      NSHomeDirectory() + "/Applications",
+    ]
+    for dir in searchDirs {
+      let candidate = URL(fileURLWithPath: dir).appendingPathComponent(fileName)
+      if FileManager.default.fileExists(atPath: candidate.path) {
+        return candidate
+      }
+    }
+    return nil
   }
 }
 
