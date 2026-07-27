@@ -97,6 +97,10 @@ public struct AgentConfiguration: Equatable, Sendable {
   public let maxScreenshotBytes: Int
   public let maxRequestBytes: Int
   public let fileEditing: FileEditingConfiguration
+  /// Independent default-deny toggle for the sandboxed shell surface
+  /// (`sh.exec`/`sh.status`). Decoupled from `fileEditing.enabled`; the shell
+  /// sandbox reuses the shared file-permission rules to scope writes.
+  public let shellAccessEnabled: Bool
 
   public init(
     socketPath: String = AgentConfiguration.defaultSocketPath,
@@ -106,7 +110,8 @@ public struct AgentConfiguration: Equatable, Sendable {
     stateDirectoryName: String = ".okbrain-macos-agent",
     maxScreenshotBytes: Int = 64 * 1024 * 1024,
     maxRequestBytes: Int = 6 * 1024 * 1024,
-    fileEditing: FileEditingConfiguration = .disabled
+    fileEditing: FileEditingConfiguration = .disabled,
+    shellAccessEnabled: Bool = false
   ) {
     self.socketPath = socketPath
     self.version = version
@@ -116,13 +121,15 @@ public struct AgentConfiguration: Equatable, Sendable {
     self.maxScreenshotBytes = maxScreenshotBytes
     self.maxRequestBytes = maxRequestBytes
     self.fileEditing = fileEditing
+    self.shellAccessEnabled = shellAccessEnabled
   }
 
   public static func current(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     bundle: Bundle = .main,
     fileEditingEnabled: Bool = false,
-    filePermissionRules: [FileEditingAllowedRoot] = []
+    filePermissionRules: [FileEditingAllowedRoot] = [],
+    shellAccessEnabled: Bool = false
   ) -> AgentConfiguration {
     let info = bundle.infoDictionary ?? [:]
     let appEnvironment = normalizedAppEnvironment(info["AppEnvironment"] as? String, bundleIdentifier: bundle.bundleIdentifier)
@@ -161,7 +168,8 @@ public struct AgentConfiguration: Equatable, Sendable {
       appEnvironment: appEnvironment,
       stateDirectoryName: stateDirectoryName,
       maxRequestBytes: maxRequestBytes,
-      fileEditing: fileEditing
+      fileEditing: fileEditing,
+      shellAccessEnabled: shellAccessEnabled
     )
   }
 
@@ -188,7 +196,22 @@ public struct AgentConfiguration: Equatable, Sendable {
       stateDirectoryName: stateDirectoryName,
       maxScreenshotBytes: maxScreenshotBytes,
       maxRequestBytes: max(maxRequestBytes, minimumRequestBytes),
-      fileEditing: nextFileEditing
+      fileEditing: nextFileEditing,
+      shellAccessEnabled: shellAccessEnabled
+    )
+  }
+
+  public func withShellAccessEnabled(_ enabled: Bool) -> AgentConfiguration {
+    AgentConfiguration(
+      socketPath: socketPath,
+      version: version,
+      build: build,
+      appEnvironment: appEnvironment,
+      stateDirectoryName: stateDirectoryName,
+      maxScreenshotBytes: maxScreenshotBytes,
+      maxRequestBytes: maxRequestBytes,
+      fileEditing: fileEditing,
+      shellAccessEnabled: enabled
     )
   }
 

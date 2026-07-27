@@ -35,6 +35,11 @@ public enum AgentProtocolError: Error, Sendable {
   case functionFailed(String, details: JSONValue?)
   case operationTimeout(String)
   case internalError(String)
+  case shellPermissionRequired(String, details: JSONValue)
+  case shellPermissionBlocked(String, details: JSONValue?)
+  case shellDeniedBySandbox(String, details: JSONValue?)
+  case shellTimeout(String)
+  case shellOutputLimit(String)
 
   public var code: String {
     switch self {
@@ -106,6 +111,16 @@ public enum AgentProtocolError: Error, Sendable {
       "operation_timeout"
     case .internalError:
       "internal_error"
+    case .shellPermissionRequired:
+      "shell_permission_required"
+    case .shellPermissionBlocked:
+      "shell_permission_blocked"
+    case .shellDeniedBySandbox:
+      "shell_denied_by_sandbox"
+    case .shellTimeout:
+      "shell_timeout"
+    case .shellOutputLimit:
+      "shell_output_limit"
     }
   }
 
@@ -143,7 +158,12 @@ public enum AgentProtocolError: Error, Sendable {
          .automationPermissionRequired(let message, _),
          .functionFailed(let message, _),
          .operationTimeout(let message),
-         .internalError(let message):
+         .internalError(let message),
+         .shellPermissionRequired(let message, _),
+         .shellPermissionBlocked(let message, _),
+         .shellDeniedBySandbox(let message, _),
+         .shellTimeout(let message),
+         .shellOutputLimit(let message):
       message
     case .responseTooLarge(let size):
       "Screenshot response exceeds the configured limit: \(size) bytes"
@@ -157,6 +177,11 @@ public enum AgentProtocolError: Error, Sendable {
          .automationPermissionRequired(_, let details):
       details
     case .functionFailed(_, let details):
+      details
+    case .shellPermissionRequired(_, let details):
+      details
+    case .shellPermissionBlocked(_, let details),
+         .shellDeniedBySandbox(_, let details):
       details
     default:
       nil

@@ -23,6 +23,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
   private let automationPermissions: AutomationPermissionServicing
   private let axPermissionCoordinator: AXPermissionCoordinator
   private let axTargetResolver: AXTargetResolving
+  private let shellExecution: ShellExecuting
   private let remoteControlEnabled: @Sendable () -> Bool
   private let makeDisplayWake: @Sendable (TimeInterval) -> (any DisplayWaking)?
 
@@ -74,6 +75,11 @@ public final class AgentRequestHandler: @unchecked Sendable {
     "functions.propose"
   ]
 
+  private let shellActions: Set<String> = [
+    "sh.exec",
+    "sh.status"
+  ]
+
   public init(
     configuration: AgentConfiguration,
     permissions: PermissionChecking = SystemPermissionService(),
@@ -85,6 +91,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
     automationPermissions: AutomationPermissionServicing = SystemAutomationPermissionService(),
     axPermissionCoordinator: AXPermissionCoordinator? = nil,
     axTargetResolver: AXTargetResolving = SystemAXTargetResolver(),
+    shellExecution: ShellExecuting? = nil,
     remoteControlEnabled: (@Sendable () -> Bool)? = nil,
     displayWakeFactory: (@Sendable (TimeInterval) -> (any DisplayWaking)?)? = nil
   ) {
@@ -98,6 +105,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
     self.automationPermissions = automationPermissions
     self.axPermissionCoordinator = axPermissionCoordinator ?? AXPermissionCoordinator()
     self.axTargetResolver = axTargetResolver
+    self.shellExecution = shellExecution ?? ShellExecutionService()
     self.remoteControlEnabled = remoteControlEnabled ?? { true }
     self.makeDisplayWake = displayWakeFactory ?? { settleDelay in DisplayWakeGuard(settleDelay: settleDelay) }
   }
@@ -123,7 +131,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
       guard envelopeActions.contains(action)
               || fileActions.contains(action)
               || accessibilityActions.contains(action)
-              || functionActions.contains(action) else {
+              || functionActions.contains(action)
+              || shellActions.contains(action) else {
         throw AgentProtocolError.unknownAction("Unknown action: \(action)")
       }
 
@@ -135,7 +144,7 @@ public final class AgentRequestHandler: @unchecked Sendable {
 
       // The global toggle disables all remote actions that execute a function
       // or drive UI, while discovery and proposal inbox operations remain safe.
-      if accessibilityActions.contains(action) || action == "functions.run" {
+      if accessibilityActions.contains(action) || action == "functions.run" || action == "sh.exec" {
         try requireRemoteControlEnabled()
       }
 
@@ -201,6 +210,17 @@ public final class AgentRequestHandler: @unchecked Sendable {
         return try encodeSuccess(protocolName: responseProtocol, id: requestID, data: FunctionProposalPayload(proposal: proposal))
       case "functions.run":
         return try runFunction(protocolName: responseProtocol, id: requestID, params: request.params ?? AgentRequestParams())
+      case "sh.status":
+        return try encodeSuccess(
+          protocolName: responseProtocol,
+          id: requestID,
+          data: shellExecution.statusPayload(
+            fileRules: configuration.fileEditing.allowedRoots,
+            enabled: configuration.shellAccessEnabled
+          )
+        )
+      case "sh.exec":
+        return try runShell(protocolName: responseProtocol, id: requestID, params: request.params ?? AgentRequestParams())
       default:
         return try dispatchAccessibility(action: action, protocolName: responseProtocol, id: requestID, params: request.params ?? AgentRequestParams())
       }
@@ -519,6 +539,36 @@ public final class AgentRequestHandler: @unchecked Sendable {
     return try fileEditing.resolveExistingReadablePath(requirement.path)
   }
 
+  private func runShell(protocolName: String, id: String, params: AgentRequestParams) throws -> Data {
+    guard configuration.shellAccessEnabled, !configuration.fileEditing.allowedRoots.isEmpty else {
+      throw AgentProtocolError.invalidRequest("sh.exec requires Shell Access to be enabled with at least one file permission rule")
+    }
+    guard let command = params.command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw AgentProtocolError.invalidRequest("command is required for sh.exec")
+    }
+    guard let cwd = params.cwd, !cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw AgentProtocolError.invalidRequest("cwd is required for sh.exec")
+    }
+
+    let request = ShellExecutionRequest(
+      command: command,
+      cwd: cwd,
+      env: params.env ?? [:],
+      timeoutSeconds: params.timeoutSeconds ?? ShellExecutionService.defaultTimeoutSeconds
+    )
+    let outcome = try shellExecution.execute(request, fileRules: configuration.fileEditing.allowedRoots)
+    let payload = ShellExecPayload(
+      command: command,
+      cwd: cwd,
+      exitCode: outcome.exitCode,
+      stdout: outcome.stdout,
+      stderr: outcome.stderr,
+      timedOut: outcome.timedOut,
+      outputTruncated: outcome.outputTruncated
+    )
+    return try encodeSuccess(protocolName: protocolName, id: id, data: payload)
+  }
+
   private func capture(protocolName: String, id: String, params: AgentRequestParams) throws -> Data {
     let currentPermissions = permissions.currentPermissions()
     guard currentPermissions.screenRecording == .granted else {
@@ -600,6 +650,13 @@ public final class AgentRequestHandler: @unchecked Sendable {
       ])
     }
 
+    if configuration.shellAccessEnabled, !configuration.fileEditing.allowedRoots.isEmpty {
+      capabilities.append(contentsOf: [
+        "sh.exec",
+        "sh.status"
+      ])
+    }
+
     if currentPermissions.accessibility == .granted {
       capabilities.append(contentsOf: [
         "ax.list-apps",
@@ -622,7 +679,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
       running: true,
       available: currentPermissions.screenRecording == .granted
         || currentPermissions.accessibility == .granted
-        || configuration.fileEditing.enabled,
+        || configuration.fileEditing.enabled
+        || (configuration.shellAccessEnabled && !configuration.fileEditing.allowedRoots.isEmpty),
       version: configuration.version,
       socketPath: configuration.socketPath,
       permissions: currentPermissions,
