@@ -13,6 +13,7 @@ struct PermissionRulesView: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 18) {
+        fileEditingToggleSection
         filePermissionsSection
 
         if let errorMessage {
@@ -24,6 +25,25 @@ struct PermissionRulesView: View {
       }
       .frame(maxWidth: .infinity, alignment: .topLeading)
       .padding(.bottom, 8)
+    }
+  }
+
+  private var fileEditingToggleSection: some View {
+    GroupBox("File Editing") {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack {
+          Toggle(isOn: $store.fileEditingEnabled) {
+            Text("File Editing").font(.headline)
+          }
+          .toggleStyle(.switch)
+          Spacer(minLength: 12)
+          StatusPill.feature(store.configuration.fileEditing.enabled)
+        }
+        Text("File access is default-deny and limited to the folder rules below.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+      }
+      .padding(4)
     }
   }
 
@@ -90,7 +110,7 @@ struct PermissionRulesView: View {
       }
     } else {
       GroupBox("File Permissions") {
-        Label("File editing is disabled. Enable it in Settings to manage folder rules.", systemImage: "lock.doc")
+        Label("File editing is off. Turn it on above to manage folder rules.", systemImage: "lock.doc")
           .foregroundStyle(.secondary)
           .padding(4)
       }

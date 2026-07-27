@@ -16,6 +16,17 @@ struct StatusPill: View {
   }
 }
 
+extension StatusPill {
+  /// Shared enabled/disabled status pill for feature toggles.
+  static func feature(_ enabled: Bool) -> StatusPill {
+    StatusPill(
+      title: enabled ? "Enabled" : "Disabled",
+      systemImage: enabled ? "checkmark.circle.fill" : "circle.dashed",
+      tint: enabled ? .green : .secondary
+    )
+  }
+}
+
 extension PermissionState {
   var label: String {
     switch self {

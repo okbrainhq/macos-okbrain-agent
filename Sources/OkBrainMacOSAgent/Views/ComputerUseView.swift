@@ -21,8 +21,17 @@ struct ComputerUseView: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 18) {
-        appControlSection
-        curatedFunctionsGroup
+        remoteControlSection
+        if store.remoteControlAPIsEnabled {
+          appControlSection
+          curatedFunctionsGroup
+        } else {
+          GroupBox("Computer Use") {
+            Label("Remote Control is off. Turn it on above to manage access grants and functions.", systemImage: "hand.raised.square")
+              .foregroundStyle(.secondary)
+              .padding(4)
+          }
+        }
       }
       .frame(maxWidth: .infinity, alignment: .topLeading)
       .padding(.bottom, 8)
@@ -39,6 +48,33 @@ struct ComputerUseView: View {
           }
         )
       }
+    }
+  }
+
+  // MARK: - Remote Control APIs
+
+  private var remoteControlSection: some View {
+    GroupBox("Remote Control APIs") {
+      VStack(alignment: .leading, spacing: 12) {
+        HStack {
+          Toggle(isOn: $store.remoteControlAPIsEnabled) {
+            Text("Enable Remote Control APIs").font(.headline)
+          }
+          .toggleStyle(.switch)
+          Spacer(minLength: 12)
+          StatusPill.feature(store.remoteControlAPIsEnabled)
+        }
+        Text("Allows the Accessibility (ax.*) API and enabled curated macOS functions. macOS may still request Automation permission for apps like Safari, Finder, Music, Spotify, or Chrome.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+        Button {
+          openAutomationSystemSettings()
+        } label: {
+          Label("Open Automation Settings", systemImage: "gear")
+        }
+        .buttonStyle(.borderedProminent)
+      }
+      .padding(4)
     }
   }
 
@@ -416,6 +452,11 @@ struct ComputerUseView: View {
     } catch {
       proposalError = error.localizedDescription
     }
+  }
+
+  private func openAutomationSystemSettings() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") else { return }
+    NSWorkspace.shared.open(url)
   }
 }
 
