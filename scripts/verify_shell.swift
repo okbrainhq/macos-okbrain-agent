@@ -248,6 +248,35 @@ func verifyCoordinator() throws {
   expectEqual(dedup.snapshot().pendingRequests.count, 1, "pending dedupes by kind/value")
 }
 
+// MARK: - Nested sandbox detection
+
+/// Returns true if this process can successfully apply a sandbox profile via
+/// sandbox-exec. When the verifier itself runs inside the agent's Seatbelt
+/// sandbox, macOS refuses the nested sandbox_apply and this returns false.
+func canApplySandbox() -> Bool {
+  guard FileManager.default.isExecutableFile(atPath: "/usr/bin/sandbox-exec") else { return false }
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+  process.arguments = ["-p", "(version 1)(allow default)", "/usr/bin/true"]
+  let pipe = Pipe()
+  process.standardOutput = pipe
+  process.standardError = pipe
+  do { try process.run() } catch { return false }
+  process.waitUntilExit()
+  return process.terminationStatus == 0
+}
+
+/// Fails with a clear message if sandbox-exec cannot be used (nested sandbox).
+func requireSandboxCapability() {
+  if !canApplySandbox() {
+    let message = "FAIL: sandbox-exec cannot apply a nested sandbox profile.\n"
+      + "This test must run OUTSIDE the agent's Seatbelt sandbox.\n"
+      + "Re-run with: run_shell_command(command: \"bash scripts/test.sh\", bypass_sandbox: true)\n"
+    FileHandle.standardError.write(Data(message.utf8))
+    exit(1)
+  }
+}
+
 // MARK: - Handler routing / error cases
 
 func makeHandler(
@@ -359,6 +388,7 @@ func verifyHandlerRouting() throws {
   }
 
   // Ask tier: an Always Allow capability rule lets an out-of-tree exec run live.
+  requireSandboxCapability()
   if FileManager.default.isExecutableFile(atPath: "/usr/bin/sandbox-exec") {
     let askDir = "/tmp/okbrain-sh-ask-\(getpid())"
     try FileManager.default.createDirectory(atPath: askDir, withIntermediateDirectories: true)
@@ -421,10 +451,7 @@ func verifyHandlerRouting() throws {
 // MARK: - Live sandbox-exec smoke test
 
 func verifyLiveSandbox() throws {
-  guard FileManager.default.isExecutableFile(atPath: "/usr/bin/sandbox-exec") else {
-    print("  (skipping live sandbox test: sandbox-exec unavailable)")
-    return
-  }
+  requireSandboxCapability()
 
   let base = "/tmp/okbrain-sh-verify-\(getpid())"
   let cwd = base + "/cwd"
