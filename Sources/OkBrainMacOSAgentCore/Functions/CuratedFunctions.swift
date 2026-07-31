@@ -157,10 +157,17 @@ public final class FunctionRegistry: @unchecked Sendable {
     self.executor = executor
   }
 
-  public static func standard(applicationResolver: ApplicationResolving = SystemApplicationResolver()) -> FunctionRegistry {
+  public static func standard(
+    applicationResolver: ApplicationResolving = SystemApplicationResolver(),
+    menuBarExtras: MenuBarExtrasServicing = SystemAccessibilityService()
+  ) -> FunctionRegistry {
     let executor = FixedAppleScriptExecutor()
     return FunctionRegistry(
-      functions: CuratedFunctionFactory.makeFunctions(executor: executor, applicationResolver: applicationResolver),
+      functions: CuratedFunctionFactory.makeFunctions(
+        executor: executor,
+        applicationResolver: applicationResolver,
+        menuBarExtras: menuBarExtras
+      ),
       executor: executor
     )
   }
@@ -263,6 +270,7 @@ private final class ClosureFunction: MacOSFunction, @unchecked Sendable {
   let name: String
   let summary: String
   let tier: FunctionTier
+  let requiresAccessibility: Bool
   let argSchema: [FunctionArg]
   let catalogTargetBundleID: String?
   let catalogPermissionTarget: PermissionTarget?
@@ -273,6 +281,7 @@ private final class ClosureFunction: MacOSFunction, @unchecked Sendable {
     name: String,
     summary: String,
     tier: FunctionTier,
+    requiresAccessibility: Bool = false,
     argSchema: [FunctionArg] = [],
     catalogTargetBundleID: String? = nil,
     catalogPermissionTarget: PermissionTarget? = nil,
@@ -284,6 +293,7 @@ private final class ClosureFunction: MacOSFunction, @unchecked Sendable {
     self.name = name
     self.summary = summary
     self.tier = tier
+    self.requiresAccessibility = requiresAccessibility
     self.argSchema = argSchema
     self.catalogTargetBundleID = catalogTargetBundleID
     self.catalogPermissionTarget = catalogPermissionTarget
@@ -296,6 +306,7 @@ private final class ClosureFunction: MacOSFunction, @unchecked Sendable {
     name: String,
     summary: String,
     tier: FunctionTier,
+    requiresAccessibility: Bool = false,
     argSchema: [FunctionArg] = [],
     catalogTargetBundleID: String? = nil,
     catalogPermissionTarget: PermissionTarget? = nil,
@@ -307,6 +318,7 @@ private final class ClosureFunction: MacOSFunction, @unchecked Sendable {
     self.name = name
     self.summary = summary
     self.tier = tier
+    self.requiresAccessibility = requiresAccessibility
     self.argSchema = argSchema
     self.catalogTargetBundleID = catalogTargetBundleID
     self.catalogPermissionTarget = catalogPermissionTarget
@@ -331,11 +343,13 @@ private final class ClosureFunction: MacOSFunction, @unchecked Sendable {
 private enum CuratedFunctionFactory {
   static func makeFunctions(
     executor: FixedAppleScriptExecutor,
-    applicationResolver: ApplicationResolving
+    applicationResolver: ApplicationResolving,
+    menuBarExtras: MenuBarExtrasServicing
   ) -> [any MacOSFunction] {
     [
       appList(),
       appIsRunning(applicationResolver: applicationResolver),
+      menuBarList(applicationResolver: applicationResolver, menuBarExtras: menuBarExtras),
       systemGetVolume(executor: executor),
       systemGetClipboard(),
       systemGetBattery(),
@@ -349,6 +363,8 @@ private enum CuratedFunctionFactory {
       appLaunch(),
       appActivate(),
       appQuit(),
+      menuBarOpen(applicationResolver: applicationResolver, menuBarExtras: menuBarExtras),
+      menuBarClick(applicationResolver: applicationResolver, menuBarExtras: menuBarExtras),
       systemSetVolume(executor: executor),
       systemMute(executor: executor),
       systemSetClipboard(),
@@ -458,6 +474,149 @@ private enum CuratedFunctionFactory {
         "app", app.map(appJSON) ?? .null
       ))
     }
+  }
+
+  private static func menuBarList(
+    applicationResolver: ApplicationResolving,
+    menuBarExtras: MenuBarExtrasServicing
+  ) -> any MacOSFunction {
+    let schema = [
+      FunctionArg(
+        name: "appName",
+        type: .string,
+        required: false,
+        description: "Optional running application name to limit the result",
+        maxLength: 255
+      )
+    ]
+    return ClosureFunction(
+      name: "menubar.list",
+      summary: "List menu bar status items. Without appName, requires Menu Bar Extras Observe access.",
+      tier: .read,
+      requiresAccessibility: true,
+      argSchema: schema,
+      catalogPermissionTarget: GlobalPermissionCategory.menuBarExtras.permissionTarget,
+      planBuilder: { args in
+        var validated = try validateFunctionArgs(args, schema: schema)
+        if let rawAppName = validated["appName"]?.stringValue {
+          let appName = try requiredMenuBarExtraArgument(rawAppName, name: "appName")
+          let target = try runningMenuBarExtraFunctionTarget(named: appName, resolver: applicationResolver)
+          validated["appName"] = .string(appName)
+          return FunctionExecutionPlan(args: validated, target: target)
+        }
+        return FunctionExecutionPlan(
+          args: validated,
+          permissionTarget: GlobalPermissionCategory.menuBarExtras.permissionTarget
+        )
+      }
+    ) { plan in
+      if let target = plan.target {
+        let app = try currentMenuBarExtraAppTarget(for: target, resolver: applicationResolver)
+        return try functionResult(from: menuBarExtras.listMenuBarExtras(app: app))
+      }
+      return try functionResult(from: menuBarExtras.listMenuBarExtras(app: nil))
+    }
+  }
+
+  private static func menuBarOpen(
+    applicationResolver: ApplicationResolving,
+    menuBarExtras: MenuBarExtrasServicing
+  ) -> any MacOSFunction {
+    let schema = menuBarStatusItemSchema()
+    return ClosureFunction(
+      name: "menubar.open",
+      summary: "Open a menu bar status item's popup menu.",
+      tier: .write,
+      requiresAccessibility: true,
+      argSchema: schema,
+      planBuilder: { args in
+        var validated = try validateFunctionArgs(args, schema: schema)
+        let appName = try requiredMenuBarExtraArgument(validated["appName"]?.stringValue, name: "appName")
+        let title = try requiredMenuBarExtraArgument(validated["title"]?.stringValue, name: "title")
+        let target = try runningMenuBarExtraFunctionTarget(named: appName, resolver: applicationResolver)
+        validated["appName"] = .string(appName)
+        validated["title"] = .string(title)
+        return FunctionExecutionPlan(args: validated, target: target)
+      }
+    ) { plan in
+      guard let target = plan.target else {
+        throw AgentProtocolError.functionFailed("Menu bar extra owner was not resolved", details: nil)
+      }
+      let app = try currentMenuBarExtraAppTarget(for: target, resolver: applicationResolver)
+      let title = try requiredMenuBarExtraArgument(plan.args["title"]?.stringValue, name: "title")
+      return try functionResult(from: menuBarExtras.openMenuBarExtra(app: app, title: title))
+    }
+  }
+
+  private static func menuBarClick(
+    applicationResolver: ApplicationResolving,
+    menuBarExtras: MenuBarExtrasServicing
+  ) -> any MacOSFunction {
+    let schema = menuBarStatusItemSchema(includeMenuPath: true)
+    return ClosureFunction(
+      name: "menubar.click",
+      summary: "Open a menu bar status item and press a popup menu item by title path.",
+      tier: .write,
+      requiresAccessibility: true,
+      argSchema: schema,
+      planBuilder: { args in
+        var validated = try validateFunctionArgs(args, schema: schema)
+        let appName = try requiredMenuBarExtraArgument(validated["appName"]?.stringValue, name: "appName")
+        let title = try requiredMenuBarExtraArgument(validated["title"]?.stringValue, name: "title")
+        guard let rawPath = validated["menuPath"]?.stringArrayValue else {
+          throw invalidArgsError("Function argument validation failed", violations: [
+            .init(argument: "menuPath", reason: "Expected an array of strings.")
+          ])
+        }
+        let menuPath = try normalizedMenuBarExtraFunctionPath(rawPath)
+        let target = try runningMenuBarExtraFunctionTarget(named: appName, resolver: applicationResolver)
+        validated["appName"] = .string(appName)
+        validated["title"] = .string(title)
+        validated["menuPath"] = .array(menuPath.map(JSONValue.string))
+        return FunctionExecutionPlan(args: validated, target: target)
+      }
+    ) { plan in
+      guard let target = plan.target else {
+        throw AgentProtocolError.functionFailed("Menu bar extra owner was not resolved", details: nil)
+      }
+      let app = try currentMenuBarExtraAppTarget(for: target, resolver: applicationResolver)
+      let title = try requiredMenuBarExtraArgument(plan.args["title"]?.stringValue, name: "title")
+      guard let menuPath = plan.args["menuPath"]?.stringArrayValue else {
+        throw AgentProtocolError.functionFailed("Menu bar click did not receive a validated menuPath", details: nil)
+      }
+      return try functionResult(from: menuBarExtras.clickMenuBarExtra(app: app, title: title, menuPath: menuPath))
+    }
+  }
+
+  private static func menuBarStatusItemSchema(includeMenuPath: Bool = false) -> [FunctionArg] {
+    var schema = [
+      FunctionArg(
+        name: "appName",
+        type: .string,
+        required: true,
+        description: "Running application that owns the menu bar status item",
+        maxLength: 255
+      ),
+      FunctionArg(
+        name: "title",
+        type: .string,
+        required: true,
+        description: "Status item title, label, or identifier",
+        maxLength: 500
+      )
+    ]
+    if includeMenuPath {
+      schema.append(FunctionArg(
+        name: "menuPath",
+        type: .stringArray,
+        required: true,
+        description: "Non-empty popup-menu title path to press",
+        maxLength: 500,
+        minItems: 1,
+        maxItems: 32
+      ))
+    }
+    return schema
   }
 
   private static func systemGetVolume(executor: FixedAppleScriptExecutor) -> any MacOSFunction {
@@ -1213,6 +1372,69 @@ private func appJSON(_ app: ApplicationDescriptor) -> JSONValue {
     "pid", app.pid.map { .number(Double($0)) } ?? .null,
     "frontmost", .bool(app.frontmost)
   )
+}
+
+private func requiredMenuBarExtraArgument(_ raw: String?, name: String) throws -> String {
+  let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  guard !value.isEmpty else {
+    throw invalidArgsError("Function argument validation failed", violations: [
+      .init(argument: name, reason: "Required argument is missing or empty.")
+    ])
+  }
+  return value
+}
+
+private func normalizedMenuBarExtraFunctionPath(_ rawPath: [String]) throws -> [String] {
+  guard !rawPath.isEmpty else {
+    throw invalidArgsError("Function argument validation failed", violations: [
+      .init(argument: "menuPath", reason: "Provide at least one menu title.")
+    ])
+  }
+  return try rawPath.enumerated().map { index, rawTitle in
+    let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !title.isEmpty else {
+      throw invalidArgsError("Function argument validation failed", violations: [
+        .init(argument: "menuPath[\(index)]", reason: "Menu titles must not be empty.")
+      ])
+    }
+    return title
+  }
+}
+
+private func runningMenuBarExtraFunctionTarget(
+  named appName: String,
+  resolver: ApplicationResolving
+) throws -> FunctionTarget {
+  switch resolver.resolveApplication(named: appName) {
+  case .resolved(let resolved):
+    guard let running = resolver.runningApplication(bundleID: resolved.bundleID),
+          running.pid.map({ $0 > 0 }) == true else {
+      throw AgentProtocolError.appNotFound("Menu bar extra owner '\(appName)' is not running")
+    }
+    return FunctionTarget(bundleID: running.bundleID, appName: running.appName, requiresAutomation: false)
+  case .notFound:
+    throw AgentProtocolError.appNotFound("No running application matches '\(appName)'")
+  case .ambiguous:
+    throw AgentProtocolError.appNotFound("Use an unambiguous running application name for '\(appName)'")
+  }
+}
+
+private func currentMenuBarExtraAppTarget(
+  for target: FunctionTarget,
+  resolver: ApplicationResolving
+) throws -> AXMenuBarExtraAppTarget {
+  guard let running = resolver.runningApplication(bundleID: target.bundleID),
+        running.bundleID.caseInsensitiveCompare(target.bundleID) == .orderedSame,
+        let pid = running.pid,
+        pid > 0 else {
+    throw AgentProtocolError.appNotFound("Menu bar extra owner '\(target.appName)' is no longer running")
+  }
+  return AXMenuBarExtraAppTarget(pid: pid, appName: running.appName, bundleID: running.bundleID)
+}
+
+private func functionResult<Payload: Encodable>(from payload: Payload) throws -> FunctionResult {
+  let data = try JSONEncoder().encode(payload)
+  return FunctionResult(value: try JSONDecoder().decode(JSONValue.self, from: data))
 }
 
 private extension String {

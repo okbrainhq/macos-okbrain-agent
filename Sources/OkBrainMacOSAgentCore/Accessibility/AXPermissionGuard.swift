@@ -68,6 +68,7 @@ public enum PermissionTargetKind: String, Codable, CaseIterable, Equatable, Send
 /// application. Keep these exhaustive and user-visible in the App Control UI.
 public enum GlobalPermissionCategory: String, Codable, CaseIterable, Equatable, Hashable, Identifiable, Sendable {
   case applicationDiscovery = "application-discovery"
+  case menuBarExtras = "menu-bar-extras"
   case systemAudio = "system-audio"
   case clipboard
   case power
@@ -80,6 +81,7 @@ public enum GlobalPermissionCategory: String, Codable, CaseIterable, Equatable, 
   public var displayName: String {
     switch self {
     case .applicationDiscovery: "Application Discovery"
+    case .menuBarExtras: "Menu Bar Extras"
     case .systemAudio: "System Audio"
     case .clipboard: "Clipboard"
     case .power: "Power & Battery"
@@ -92,6 +94,7 @@ public enum GlobalPermissionCategory: String, Codable, CaseIterable, Equatable, 
   public var summary: String {
     switch self {
     case .applicationDiscovery: "List running applications through app.list or ax.list-apps."
+    case .menuBarExtras: "List status items from all running applications' menu bar extras."
     case .systemAudio: "Read or change system output volume and mute state."
     case .clipboard: "Read or replace plain-text clipboard contents."
     case .power: "Read battery capacity and charging state."
@@ -104,6 +107,7 @@ public enum GlobalPermissionCategory: String, Codable, CaseIterable, Equatable, 
   public var symbolName: String {
     switch self {
     case .applicationDiscovery: "rectangle.stack"
+    case .menuBarExtras: "menubar.rectangle"
     case .systemAudio: "speaker.wave.2"
     case .clipboard: "doc.on.clipboard"
     case .power: "battery.75percent"

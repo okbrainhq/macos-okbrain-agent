@@ -76,6 +76,7 @@ The always-available global categories are:
 | Category | Observe examples | Control examples |
 | --- | --- | --- |
 | Application Discovery | `ax.list-apps`, `app.list` | — |
+| Menu Bar Extras | unfiltered `menubar.list` | — |
 | System Audio | `system.get-volume` | `system.set-volume`, `system.mute` |
 | Clipboard | `system.get-clipboard` | `system.set-clipboard` |
 | Power & Battery | `system.get-battery` | — |
@@ -112,7 +113,7 @@ Example error:
 ### 2.4 Config, persistence, UI
 
 - `AgentRuntimeStore` persists generalized `[AXAppPermissionRule]` records and exposes them as `permissionRules`.
-- **App & Global Access** always shows the seven global capability choices in its Target picker.
+- **App & Global Access** always shows the eight global capability choices in its Target picker.
 - Applications are added only through **Choose Application…**, a native `.app` file browser. The selected bundle is validated with `Bundle(url:)`, bundle ID validation, and de-duplication; a running-process list is not the permission source.
 - The rule table exposes only Observe and Control. Removing a rule revokes its matching session grant as well.
 - Timed-out requests appear in the app and menu bar with their requested intent.
@@ -174,6 +175,7 @@ A Tier-1 function is *catalog-enabled* by default, but it is **not permission-en
 | --- | --- | --- |
 | `app.list` | Application Discovery | NSWorkspace running app list |
 | `app.is-running` | requested app bundle | name resolves uniquely before status is returned |
+| `menubar.list` | Menu Bar Extras without `appName`; requested owner app with `appName` | Native AX enumeration of `AXExtrasMenuBar` status items |
 | `system.get-volume` | System Audio | fixed AppleScript volume/mute state |
 | `system.get-clipboard` | Clipboard | plain text only |
 | `system.get-battery` | Power & Battery | IOKit capacity/charging |
@@ -187,6 +189,7 @@ A Tier-1 function is *catalog-enabled* by default, but it is **not permission-en
 | Function | Permission target | Notes |
 | --- | --- | --- |
 | `app.launch` / `app.activate` / `app.quit` | requested app bundle | `quit` remains graceful only |
+| `menubar.open` / `menubar.click` | running owner app | Native AX popup opening/navigation; status item title can match title, label, or identifier |
 | `system.set-volume` / `system.mute` | System Audio | fixed bounded input |
 | `system.set-clipboard` | Clipboard | plain text only |
 | `system.notify` | Notifications | fixed OkBrain Agent branding |
@@ -194,6 +197,20 @@ A Tier-1 function is *catalog-enabled* by default, but it is **not permission-en
 | `browser.open-url` | Safari or Chrome app | opens a new tab |
 | `finder.reveal` | Finder app + file read rule | canonical, symlink-safe file check first |
 | `dialog.ask-user` | User Dialogs | fixed agent-branded dialog |
+
+### 3.2.1 Menu bar extras
+
+These are catalog functions, not new `ax.*` protocol actions. Discover their exact schemas through `functions.list`, then run them through `functions.run`:
+
+```json
+{ "action": "functions.run", "params": {
+  "functionName": "menubar.list", "args": { "appName": "Acme VPN" }
+} }
+```
+
+- All three functions also require the process-level macOS **Accessibility** grant. Omitting `appName` from `menubar.list` enumerates every running app that exposes `AXExtrasMenuBar` and requires the global **Menu Bar Extras** Observe grant. Supplying `appName` limits the read to one currently running, app-authorized owner.
+- `menubar.open` requires `{ appName, title }`, Control for that owner app, and returns the opened popup's top-level items. `title` is matched case-insensitively after trimming against the status item's title, label, or identifier; ambiguous matches fail.
+- `menubar.click` requires `{ appName, title, menuPath }`, where `menuPath` is a non-empty array of non-empty strings such as `["Settings…", "General"]`. It opens the status item, navigates the hierarchy, presses the final item, and returns the normalized path.
 
 **Tier 3 — elevated (off by default + explicit Control):**
 

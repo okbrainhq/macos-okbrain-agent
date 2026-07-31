@@ -21,7 +21,16 @@ public protocol AccessibilityServicing: Sendable {
   func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws
 }
 
-public final class SystemAccessibilityService: AccessibilityServicing, @unchecked Sendable {
+/// Native AX operations for menu-bar status items. This narrow boundary keeps
+/// curated-function tests independent from live AX and avoids adding ax.*
+/// protocol actions for menu-bar extras.
+public protocol MenuBarExtrasServicing: Sendable {
+  func listMenuBarExtras(app: AXMenuBarExtraAppTarget?) throws -> AXMenuBarExtrasListPayload
+  func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String) throws -> AXMenuBarExtraOpenPayload
+  func clickMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String, menuPath: [String]) throws -> AXMenuBarExtraClickPayload
+}
+
+public final class SystemAccessibilityService: AccessibilityServicing, MenuBarExtrasServicing, @unchecked Sendable {
   private static let maxValueLength = 2_000
   private static let maxTypeTextLength = 10_000
 
@@ -330,6 +339,93 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
     return AXMenuListPayload(appName: target.name, items: items)
   }
 
+  // MARK: - Menu bar extras
+
+  public func listMenuBarExtras(app: AXMenuBarExtraAppTarget?) throws -> AXMenuBarExtrasListPayload {
+    try requireAccessibilityTrust()
+    let applications: [NSRunningApplication]
+    if let app {
+      applications = [try resolveMenuBarExtraApp(app)]
+    } else {
+      applications = NSWorkspace.shared.runningApplications
+        .filter { !$0.isTerminated }
+        .sorted { menuBarExtraAppName($0).localizedCaseInsensitiveCompare(menuBarExtraAppName($1)) == .orderedAscending }
+    }
+
+    var items: [AXMenuBarExtraPayload] = []
+    for application in applications {
+      let appElement = AXUIElementCreateApplication(application.processIdentifier)
+      guard let extrasMenuBar = axElement(from: copyAttribute(appElement, kAXExtrasMenuBarAttribute)) else {
+        continue
+      }
+      for item in immediateChildren(of: extrasMenuBar, role: kAXMenuBarItemRole) {
+        items.append(menuBarExtraPayload(for: item, app: application))
+      }
+    }
+    return AXMenuBarExtrasListPayload(items: items)
+  }
+
+  public func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String) throws -> AXMenuBarExtraOpenPayload {
+    try requireAccessibilityTrust()
+    let normalizedTitle = try requiredMenuBarExtraTitle(title, action: "menubar.open")
+    return try withOpenedMenuBarExtra(app: app, title: normalizedTitle) { opened in
+      AXMenuBarExtraOpenPayload(
+        appName: opened.appName,
+        statusItem: menuBarExtraPayload(for: opened.statusItem, app: opened.app),
+        menuItems: immediateChildren(of: opened.menu, role: kAXMenuItemRole).map(snapshot)
+      )
+    }
+  }
+
+  public func clickMenuBarExtra(
+    app: AXMenuBarExtraAppTarget,
+    title: String,
+    menuPath: [String]
+  ) throws -> AXMenuBarExtraClickPayload {
+    try requireAccessibilityTrust()
+    let normalizedTitle = try requiredMenuBarExtraTitle(title, action: "menubar.click")
+    let normalizedPath = try normalizedMenuBarExtraPath(menuPath)
+    return try withOpenedMenuBarExtra(app: app, title: normalizedTitle) { opened in
+      var currentMenu = opened.menu
+
+      for index in normalizedPath.indices {
+        let itemTitle = normalizedPath[index]
+        let parentPath = Array(normalizedPath[..<index])
+        let item = try findMenuBarExtraMenuItem(
+          in: currentMenu,
+          titled: itemTitle,
+          appName: opened.appName,
+          parentPath: parentPath
+        )
+        try ensureMenuBarExtraItemEnabled(item, title: itemTitle, kind: "Menu item", appName: opened.appName)
+
+        if index == normalizedPath.index(before: normalizedPath.endIndex) {
+          try performMenuBarExtraAction(
+            item,
+            action: kAXPressAction,
+            context: "Unable to click menu item '\(itemTitle)' in \(opened.appName)"
+          )
+          return AXMenuBarExtraClickPayload(
+            appName: opened.appName,
+            statusItem: menuBarExtraPayload(for: opened.statusItem, app: opened.app),
+            path: normalizedPath,
+            item: snapshot(item)
+          )
+        }
+
+        currentMenu = try showMenuAndWait(
+          for: item,
+          title: itemTitle,
+          kind: "submenu",
+          appName: opened.appName,
+          path: Array(normalizedPath[...index])
+        )
+      }
+
+      throw AgentProtocolError.internalError("Menu bar extra navigation did not reach a final item")
+    }
+  }
+
   public func value(query: AXElementQuery) throws -> AXValuePayload {
     let app = try resolveApp(query)
     let roots = try searchRoots(for: app, query: query)
@@ -573,6 +669,268 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
 
     var name: String {
       app.localizedName ?? app.bundleIdentifier ?? "Unknown app"
+    }
+  }
+
+  private struct OpenedMenuBarExtra {
+    let app: NSRunningApplication
+    let appName: String
+    let statusItem: AXUIElement
+    let menu: AXUIElement
+  }
+
+  private enum MenuBarExtraOperationError: Error {
+    case invalidUIElement
+  }
+
+  private func menuBarExtraAppName(_ app: NSRunningApplication) -> String {
+    app.localizedName ?? app.bundleIdentifier ?? "Unknown app"
+  }
+
+  private func requireAccessibilityTrust() throws {
+    guard AXIsProcessTrusted() else {
+      throw AgentProtocolError.permissionDenied("Accessibility permission is not granted")
+    }
+  }
+
+  private func resolveMenuBarExtraApp(_ target: AXMenuBarExtraAppTarget) throws -> NSRunningApplication {
+    guard let app = NSRunningApplication(processIdentifier: target.pid),
+          !app.isTerminated,
+          app.processIdentifier == target.pid,
+          let bundleID = app.bundleIdentifier,
+          bundleID.caseInsensitiveCompare(target.bundleID) == .orderedSame else {
+      throw AgentProtocolError.appNotFound("Menu bar extra owner '\(target.appName)' is no longer running")
+    }
+    return app
+  }
+
+  private func extrasMenuBar(for app: NSRunningApplication) throws -> AXUIElement {
+    let appElement = AXUIElementCreateApplication(app.processIdentifier)
+    guard let extrasMenuBar = axElement(from: copyAttribute(appElement, kAXExtrasMenuBarAttribute)) else {
+      throw AgentProtocolError.elementNotFound("App '\(menuBarExtraAppName(app))' has no menu bar extras")
+    }
+    return extrasMenuBar
+  }
+
+  private func menuBarExtraPayload(for item: AXUIElement, app: NSRunningApplication) -> AXMenuBarExtraPayload {
+    let description = normalizedMenuBarExtraText(stringAttribute(item, kAXDescriptionAttribute))
+    let label = normalizedMenuBarExtraText(stringAttribute(item, "AXLabel")) ?? description
+    return AXMenuBarExtraPayload(
+      appName: menuBarExtraAppName(app),
+      bundleID: app.bundleIdentifier,
+      pid: app.processIdentifier,
+      title: normalizedMenuBarExtraText(stringAttribute(item, kAXTitleAttribute)),
+      label: label,
+      identifier: normalizedMenuBarExtraText(stringAttribute(item, kAXIdentifierAttribute)),
+      description: description,
+      enabled: boolAttribute(item, kAXEnabledAttribute) ?? true,
+      frame: frame(of: item)
+    )
+  }
+
+  /// An AX element may disappear between discovery and action when its owner
+  /// redraws the status bar. Retry once from the app's extras menu bar rather
+  /// than applying an action to a stale element.
+  private func withOpenedMenuBarExtra<Result>(
+    app target: AXMenuBarExtraAppTarget,
+    title: String,
+    operation: (OpenedMenuBarExtra) throws -> Result
+  ) throws -> Result {
+    for attempt in 0..<2 {
+      do {
+        return try operation(try openMenuBarExtraMenuAttempt(app: target, title: title))
+      } catch MenuBarExtraOperationError.invalidUIElement {
+        guard attempt == 0 else {
+          throw AgentProtocolError.actionFailed("Menu bar status item '\(title)' became unavailable before it could be used")
+        }
+      }
+    }
+    throw AgentProtocolError.internalError("Menu bar extra retry did not complete")
+  }
+
+  private func openMenuBarExtraMenuAttempt(
+    app target: AXMenuBarExtraAppTarget,
+    title: String
+  ) throws -> OpenedMenuBarExtra {
+    let app = try resolveMenuBarExtraApp(target)
+    let appName = menuBarExtraAppName(app)
+    let extrasMenuBar = try extrasMenuBar(for: app)
+    let statusItem = try findMenuBarExtraStatusItem(in: extrasMenuBar, matching: title, appName: appName)
+    try ensureMenuBarExtraItemEnabled(statusItem, title: title, kind: "Status item", appName: appName)
+    let menu = try showMenuAndWait(
+      for: statusItem,
+      title: title,
+      kind: "status item",
+      appName: appName,
+      path: [title]
+    )
+    return OpenedMenuBarExtra(app: app, appName: appName, statusItem: statusItem, menu: menu)
+  }
+
+  private func requiredMenuBarExtraTitle(_ rawTitle: String, action: String) throws -> String {
+    let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !title.isEmpty else {
+      throw AgentProtocolError.invalidRequest("title is required for \(action)")
+    }
+    return title
+  }
+
+  private func normalizedMenuBarExtraPath(_ path: [String]) throws -> [String] {
+    guard !path.isEmpty else {
+      throw AgentProtocolError.invalidRequest("menuPath must be a non-empty array of menu titles for menubar.click")
+    }
+    return try path.enumerated().map { index, rawTitle in
+      let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !title.isEmpty else {
+        throw AgentProtocolError.invalidRequest("menuPath[\(index)] must be a non-empty menu title for menubar.click")
+      }
+      return title
+    }
+  }
+
+  private func findMenuBarExtraStatusItem(
+    in extrasMenuBar: AXUIElement,
+    matching rawTitle: String,
+    appName: String
+  ) throws -> AXUIElement {
+    let candidates = immediateChildren(of: extrasMenuBar, role: kAXMenuBarItemRole)
+    let title = normalizedMenuBarExtraMatch(rawTitle)
+    let exactMatches = candidates.filter { item in
+      menuBarExtraMatchValues(for: item).contains(title)
+    }
+    if exactMatches.count == 1, let item = exactMatches.first {
+      return item
+    }
+    if exactMatches.count > 1 {
+      throw menuBarExtraAmbiguityError(kind: "status items", title: rawTitle, appName: appName)
+    }
+
+    let partialMatches = candidates.filter { item in
+      menuBarExtraMatchValues(for: item).contains { $0.contains(title) }
+    }
+    if partialMatches.count == 1, let item = partialMatches.first {
+      return item
+    }
+    if partialMatches.count > 1 {
+      throw menuBarExtraAmbiguityError(kind: "status items", title: rawTitle, appName: appName)
+    }
+    throw AgentProtocolError.elementNotFound("Status item '\(rawTitle)' not found in \(appName)")
+  }
+
+  private func findMenuBarExtraMenuItem(
+    in menu: AXUIElement,
+    titled rawTitle: String,
+    appName: String,
+    parentPath: [String]
+  ) throws -> AXUIElement {
+    let candidates = immediateChildren(of: menu, role: kAXMenuItemRole)
+    let title = normalizedMenuBarExtraMatch(rawTitle)
+    let exactMatches = candidates.filter {
+      normalizedMenuBarExtraMatch(stringAttribute($0, kAXTitleAttribute)) == title
+    }
+    if exactMatches.count == 1, let item = exactMatches.first {
+      return item
+    }
+    if exactMatches.count > 1 {
+      throw menuBarExtraAmbiguityError(kind: "menu items", title: rawTitle, appName: appName)
+    }
+
+    let partialMatches = candidates.filter {
+      normalizedMenuBarExtraMatch(stringAttribute($0, kAXTitleAttribute)).contains(title)
+    }
+    if partialMatches.count == 1, let item = partialMatches.first {
+      return item
+    }
+    if partialMatches.count > 1 {
+      throw menuBarExtraAmbiguityError(kind: "menu items", title: rawTitle, appName: appName)
+    }
+
+    let parentDescription = parentPath.isEmpty ? "" : " under \(parentPath.joined(separator: " > "))"
+    throw AgentProtocolError.elementNotFound("Menu item '\(rawTitle)' not found\(parentDescription) in \(appName)")
+  }
+
+  private func menuBarExtraMatchValues(for item: AXUIElement) -> Set<String> {
+    let description = stringAttribute(item, kAXDescriptionAttribute)
+    let label = stringAttribute(item, "AXLabel") ?? description
+    return [
+      stringAttribute(item, kAXTitleAttribute),
+      label,
+      stringAttribute(item, kAXIdentifierAttribute)
+    ].compactMap(normalizedMenuBarExtraText)
+    .map { normalizedMenuBarExtraMatch($0) }
+    .reduce(into: Set<String>()) { values, value in
+      values.insert(value)
+    }
+  }
+
+  private func normalizedMenuBarExtraText(_ raw: String?) -> String? {
+    guard let raw else { return nil }
+    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+
+  private func normalizedMenuBarExtraMatch(_ raw: String?) -> String {
+    let value = normalizedMenuBarExtraText(raw) ?? ""
+    return value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+  }
+
+  private func menuBarExtraAmbiguityError(kind: String, title: String, appName: String) -> AgentProtocolError {
+    AgentProtocolError.invalidRequest(
+      "Multiple \(kind) match '\(title)' in \(appName); use a title, label, or identifier that uniquely identifies one item"
+    )
+  }
+
+  private func showMenuAndWait(
+    for item: AXUIElement,
+    title: String,
+    kind: String,
+    appName: String,
+    path: [String]
+  ) throws -> AXUIElement {
+    let action = supportsAXAction(item, kAXShowMenuAction) ? kAXShowMenuAction : kAXPressAction
+    try performMenuBarExtraAction(
+      item,
+      action: action,
+      context: "Unable to open \(kind) '\(title)' in \(appName)"
+    )
+    return try waitForOpenedMenu(for: item, appName: appName, path: path)
+  }
+
+  private func performMenuBarExtraAction(_ item: AXUIElement, action: String, context: String) throws {
+    let result = AXUIElementPerformAction(item, action as CFString)
+    if result == .invalidUIElement {
+      throw MenuBarExtraOperationError.invalidUIElement
+    }
+    try checkAX(result, context)
+  }
+
+  private func supportsAXAction(_ element: AXUIElement, _ action: String) -> Bool {
+    var actions: CFArray?
+    guard AXUIElementCopyActionNames(element, &actions) == .success,
+          let actions,
+          let actionNames = actions as? [String] else {
+      return false
+    }
+    return actionNames.contains { $0.caseInsensitiveCompare(action) == .orderedSame }
+  }
+
+  private func waitForOpenedMenu(for item: AXUIElement, appName: String, path: [String]) throws -> AXUIElement {
+    let deadline = Date().addingTimeInterval(0.75)
+    repeat {
+      if let menu = immediateChildren(of: item, role: kAXMenuRole).first {
+        return menu
+      }
+      Thread.sleep(forTimeInterval: 0.05)
+    } while Date() < deadline
+
+    throw AgentProtocolError.elementNotFound(
+      "Menu '\(path.joined(separator: " > "))' did not appear in \(appName)"
+    )
+  }
+
+  private func ensureMenuBarExtraItemEnabled(_ item: AXUIElement, title: String, kind: String, appName: String) throws {
+    guard boolAttribute(item, kAXEnabledAttribute) != false else {
+      throw AgentProtocolError.actionFailed("\(kind) '\(title)' is disabled in \(appName)")
     }
   }
 

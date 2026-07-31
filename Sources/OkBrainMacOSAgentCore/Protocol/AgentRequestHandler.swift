@@ -467,6 +467,11 @@ public final class AgentRequestHandler: @unchecked Sendable {
     guard functionState.isEnabled(function.name, tier: function.tier) else {
       throw AgentProtocolError.functionDisabled("Function '\(function.name)' is disabled. Enable it in the local OkBrain Agent settings.")
     }
+    if function.requiresAccessibility {
+      // Native AX-backed catalog functions must fail with the same clear TCC
+      // error as ax.* before they resolve targets or request App & Global Access.
+      try requireAccessibility()
+    }
     let executionIdentity = function.executionIdentity
 
     do {
@@ -506,6 +511,9 @@ public final class AgentRequestHandler: @unchecked Sendable {
         try axPermissionCoordinator.recheckObservationWithoutPrompt(target: permissionTarget, action: permissionAction)
       } else {
         try axPermissionCoordinator.recheckControlWithoutPrompt(target: permissionTarget, action: permissionAction)
+      }
+      if function.requiresAccessibility {
+        try requireAccessibility()
       }
 
       let context = FunctionExecutionContext(canObserveApp: { [axPermissionCoordinator] target in
