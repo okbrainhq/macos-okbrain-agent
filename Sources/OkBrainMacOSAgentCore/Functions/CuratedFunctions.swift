@@ -38,7 +38,53 @@ public protocol ApplicationResolving: Sendable {
   func resolveApplication(named name: String) -> ApplicationNameResolution
 }
 
-public final class SystemApplicationResolver: ApplicationResolving, @unchecked Sendable {
+/// Optional capability used by menu-bar functions, whose owners must be
+/// running. Keeping it separate avoids changing exact name semantics for other
+/// curated functions that only need to resolve an installed application.
+public protocol RunningApplicationNameResolving: ApplicationResolving {
+  func resolveRunningApplication(named name: String) -> ApplicationNameResolution
+}
+
+/// Resolves a unique running app by localized display name: exact first, then
+/// a case-insensitive partial match. Callers pass only running descriptors.
+func resolveUniqueRunningApplication(
+  named rawName: String,
+  in applications: [ApplicationDescriptor]
+) -> ApplicationNameResolution {
+  let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard !name.isEmpty else { return .notFound }
+
+  func resolution(for matches: [ApplicationDescriptor]) -> ApplicationNameResolution {
+    var uniqueMatches: [String: ApplicationDescriptor] = [:]
+    for app in matches {
+      let bundleKey = app.bundleID.lowercased()
+      if uniqueMatches[bundleKey] == nil {
+        uniqueMatches[bundleKey] = app
+      }
+    }
+    switch uniqueMatches.count {
+    case 0:
+      return .notFound
+    case 1:
+      guard let app = uniqueMatches.values.first else { return .notFound }
+      return .resolved(app)
+    default:
+      return .ambiguous
+    }
+  }
+
+  let exactMatches = applications.filter {
+    $0.appName.caseInsensitiveCompare(name) == .orderedSame
+  }
+  if !exactMatches.isEmpty {
+    return resolution(for: exactMatches)
+  }
+  return resolution(for: applications.filter {
+    $0.appName.localizedCaseInsensitiveContains(name)
+  })
+}
+
+public final class SystemApplicationResolver: ApplicationResolving, RunningApplicationNameResolving, @unchecked Sendable {
   public init() {}
 
   public func resolveApplication(bundleID rawBundleID: String) -> ApplicationDescriptor? {
@@ -106,6 +152,10 @@ public final class SystemApplicationResolver: ApplicationResolving, @unchecked S
       return .notFound
     }
     return .resolved(ApplicationDescriptor(bundleID: bundleID, appName: displayName))
+  }
+
+  public func resolveRunningApplication(named name: String) -> ApplicationNameResolution {
+    resolveUniqueRunningApplication(named: name, in: runningApplications())
   }
 
   private func runningApplications() -> [ApplicationDescriptor] {
@@ -1405,7 +1455,14 @@ private func runningMenuBarExtraFunctionTarget(
   named appName: String,
   resolver: ApplicationResolving
 ) throws -> FunctionTarget {
-  switch resolver.resolveApplication(named: appName) {
+  let resolution: ApplicationNameResolution
+  if let runningResolver = resolver as? any RunningApplicationNameResolving {
+    resolution = runningResolver.resolveRunningApplication(named: appName)
+  } else {
+    resolution = resolver.resolveApplication(named: appName)
+  }
+
+  switch resolution {
   case .resolved(let resolved):
     guard let running = resolver.runningApplication(bundleID: resolved.bundleID),
           running.pid.map({ $0 > 0 }) == true else {
@@ -1415,7 +1472,7 @@ private func runningMenuBarExtraFunctionTarget(
   case .notFound:
     throw AgentProtocolError.appNotFound("No running application matches '\(appName)'")
   case .ambiguous:
-    throw AgentProtocolError.appNotFound("Use an unambiguous running application name for '\(appName)'")
+    throw AgentProtocolError.invalidRequest("Use an unambiguous running application name for '\(appName)'")
   }
 }
 
