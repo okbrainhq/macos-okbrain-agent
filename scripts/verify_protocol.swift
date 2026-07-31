@@ -90,6 +90,8 @@ func runProtocolVerifier() throws {
   expect(!wrongProtocol.ok, "wrong protocol should fail")
   expectEqual(wrongProtocol.error?.code, "protocol_mismatch", "protocol mismatch code")
 
+  try verifyScreenshotPidRaise(configuration: configuration, screenshot: screenshot)
+
   try runAccessibilityVerifier(configuration: configuration)
 
   try runGuardrailsAndFunctionsVerifier(configuration: configuration)
@@ -707,6 +709,42 @@ func verifyPermissionCoordinatorHardening() throws {
     from: JSONEncoder().encode(currentSnapshot)
   )
   expectEqual(roundTrip, currentSnapshot, "current generalized permission state must round-trip through persistence")
+}
+
+func verifyScreenshotPidRaise(configuration: AgentConfiguration, screenshot: CapturedImage) throws {
+  let accessibility = RecordingAccessibilityService(apps: [])
+  let handler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .granted, accessibility: .denied)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    accessibility: accessibility
+  )
+
+  // A capture that names a pid raises that app to the front first (best-effort).
+  let withPid = try sendFrame(
+    AgentRequest(
+      id: "req_capture_pid",
+      action: "screenshot.capture",
+      params: AgentRequestParams(mode: "full", format: "webp", pid: 701)
+    ),
+    to: handler,
+    as: ScreenshotCapturePayload.self
+  )
+  expect(withPid.envelope.ok, "capture with pid should be ok")
+  expectEqual(accessibility.frontmostPIDs, [Int32?(701)], "capture with pid must raise that app before capturing")
+
+  // A capture without a pid must not raise anything.
+  let withoutPid = try sendFrame(
+    AgentRequest(
+      id: "req_capture_no_pid",
+      action: "screenshot.capture",
+      params: AgentRequestParams(mode: "full", format: "webp")
+    ),
+    to: handler,
+    as: ScreenshotCapturePayload.self
+  )
+  expect(withoutPid.envelope.ok, "capture without pid should be ok")
+  expectEqual(accessibility.frontmostPIDs, [Int32?(701)], "capture without pid must not raise any app")
 }
 
 func verifyVisibilityAndCapturedPIDDispatch(configuration: AgentConfiguration, screenshot: CapturedImage) throws {

@@ -1009,8 +1009,31 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     if axResult != .success {
       app.activate()
     }
-    // Let the window server settle window ordering before any events are posted.
-    Thread.sleep(forTimeInterval: 0.2)
+
+    // The window server applies the raise asynchronously, so poll until the app
+    // actually reports frontmost instead of trusting a fixed delay. ~75ms steps
+    // up to a 1.8s ceiling: fast when the switch lands quickly, bounded so a
+    // stuck/unraisable app never blocks the action for long. Best-effort — we
+    // proceed to the settle delay whether or not the poll confirmed frontmost.
+    let pollInterval: TimeInterval = 0.075
+    let pollTimeout: TimeInterval = 1.8
+    var waited: TimeInterval = 0
+    while waited < pollTimeout {
+      if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        break
+      }
+      Thread.sleep(forTimeInterval: pollInterval)
+      waited += pollInterval
+    }
+
+    // Once frontmost is confirmed (or the poll times out), let the app-switch /
+    // window-order animation finish before any events are posted. macOS
+    // app-switch animations run ~0.2–0.5s; 0.35s sits mid-band — long enough to
+    // outlast the animation (heavier than the 0.15s menu-open settle used
+    // elsewhere in this file), short enough to keep actions responsive. The poll
+    // above already absorbed the raise latency, so this only covers the visual
+    // animation tail.
+    Thread.sleep(forTimeInterval: 0.35)
   }
 
   // MARK: - Event posting

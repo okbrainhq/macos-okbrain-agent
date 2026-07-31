@@ -199,9 +199,11 @@ Modes:
 
 | Mode | Required params | Notes |
 | --- | --- | --- |
-| `full` | none | Primary display; set `includeCursor: true` to include the pointer |
-| `window` | `appName` or `windowId` | Set `includeCursor: true` to include the pointer if it is within the capture |
+| `full` | none | Primary display; set `includeCursor: true` to include the pointer. Add `pid` to raise that app to the front first |
+| `window` | `appName`, `windowId`, or `pid` | Set `includeCursor: true` to include the pointer if it is within the capture. With `pid`, the largest on-screen window owned by that process is captured; if the app has no on-screen window (e.g. a menu-bar-only app) the full screen is captured instead |
 | `region` | `rect: { x, y, width, height }` | Screen coordinates; `includeCursor` is not supported |
+
+When `params.pid` is provided (any mode), the agent raises that application to the front before capturing (best-effort — a failed raise does not block the capture), so full-screen captures show the target app on top. Window-mode `pid` resolution picks the largest on-screen window with `windowLayer == 0` whose owning process id matches.
 
 ### `permissions.status`
 

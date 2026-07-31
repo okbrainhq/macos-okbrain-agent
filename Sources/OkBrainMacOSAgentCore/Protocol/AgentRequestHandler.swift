@@ -629,6 +629,15 @@ public final class AgentRequestHandler: @unchecked Sendable {
       throw AgentProtocolError.permissionDenied("Screen Recording permission is not granted")
     }
 
+    // When a pid is supplied, raise that app to the front first so full-screen
+    // captures show it on top and window capture can resolve its window.
+    // Best-effort: ensureFrontmost never throws (the AX frontmost call falls
+    // back to NSRunningApplication.activate(), which needs no AX permission),
+    // so a failed raise must not block the screenshot.
+    if let pid = params.pid, pid > 0 {
+      accessibility.ensureFrontmost(pid: pid)
+    }
+
     let image = try screenshots.capture(params)
     guard image.data.count <= configuration.maxScreenshotBytes else {
       throw AgentProtocolError.responseTooLarge(image.data.count)
