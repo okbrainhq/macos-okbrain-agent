@@ -368,3 +368,96 @@ public struct AXMenuBarExtraClickPayload: Codable, Equatable, Sendable {
     self.item = item
   }
 }
+
+/// One item in an application's menu bar (or one of its menus) as surfaced by
+/// the curated `menu.list` function. `path` is the title path that `menu.click`
+/// accepts to press the same item.
+public struct AXAppMenuItemPayload: Codable, Equatable, Sendable {
+  public let title: String
+  public let enabled: Bool
+  public let hasSubmenu: Bool
+  public let path: [String]
+
+  public init(title: String, enabled: Bool, hasSubmenu: Bool, path: [String]) {
+    self.title = title
+    self.enabled = enabled
+    self.hasSubmenu = hasSubmenu
+    self.path = path
+  }
+}
+
+/// The visible menu bar items for one application.
+public struct AXAppMenuListPayload: Codable, Equatable, Sendable {
+  public let appName: String
+  public let items: [AXAppMenuItemPayload]
+
+  public init(appName: String, items: [AXAppMenuItemPayload]) {
+    self.appName = appName
+    self.items = items
+  }
+}
+
+/// One on-screen window as surfaced by the curated `window.list` function.
+/// `index` is the window's stable position within its owning application and is
+/// used as the window identifier for the other `window.*` functions.
+public struct AXWindowCatalogItemPayload: Codable, Equatable, Sendable {
+  public let appName: String
+  public let bundleID: String?
+  public let pid: Int32
+  public let index: Int
+  public let title: String?
+  public let role: String?
+  public let subrole: String?
+  public let frame: CaptureRect?
+  public let main: Bool
+
+  public init(
+    appName: String,
+    bundleID: String?,
+    pid: Int32,
+    index: Int,
+    title: String?,
+    role: String?,
+    subrole: String?,
+    frame: CaptureRect?,
+    main: Bool
+  ) {
+    self.appName = appName
+    self.bundleID = bundleID
+    self.pid = pid
+    self.index = index
+    self.title = title
+    self.role = role
+    self.subrole = subrole
+    self.frame = frame
+    self.main = main
+  }
+}
+
+/// Windows found across one or more running applications.
+public struct AXWindowCatalogPayload: Codable, Equatable, Sendable {
+  public let windows: [AXWindowCatalogItemPayload]
+
+  public init(windows: [AXWindowCatalogItemPayload]) {
+    self.windows = windows
+  }
+}
+
+/// Result of a curated window action (close, minimize, zoom, or raise).
+public struct AXWindowActionPayload: Codable, Equatable, Sendable {
+  public let action: String
+  public let appName: String
+  public let bundleID: String?
+  public let pid: Int32
+  public let index: Int
+  public let title: String?
+
+  public init(action: String, appName: String, bundleID: String?, pid: Int32, index: Int, title: String?) {
+    self.action = action
+    self.appName = appName
+    self.bundleID = bundleID
+    self.pid = pid
+    self.index = index
+    self.title = title
+  }
+}

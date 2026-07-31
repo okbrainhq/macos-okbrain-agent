@@ -94,6 +94,7 @@ func runProtocolVerifier() throws {
 
   try runGuardrailsAndFunctionsVerifier(configuration: configuration)
   try verifyMenuBarExtraFunctions(configuration: configuration, screenshot: screenshot)
+  try verifyWindowAndMenuFunctions(configuration: configuration, screenshot: screenshot)
 
   try runConfigurationVerifier()
   try runFileEditingVerifier(permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .unknown)))
@@ -1231,6 +1232,13 @@ func verifyGlobalPermissionCategories(configuration: AgentConfiguration, screens
     "app.quit",
     "menubar.open",
     "menubar.click",
+    "menu.list",
+    "menu.click",
+    "window.list",
+    "window.close",
+    "window.minimize",
+    "window.zoom",
+    "window.raise",
     "media.play-pause",
     "media.next",
     "media.previous",
@@ -1410,6 +1418,7 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
   expectEqual(openEntry.tier, .write, "menubar.open should be Tier 2")
   expectEqual(clickEntry.tier, .write, "menubar.click should be Tier 2")
   expectEqual(openEntry.args.map(\.name), ["appName", "title"], "menubar.open argument schema")
+  expectEqual(openEntry.args.first(where: { $0.name == "title" })?.required, false, "menubar.open title must be optional")
   expectEqual(clickEntry.args.map(\.name), ["appName", "title", "menuPath"], "menubar.click argument schema")
   expectEqual(clickEntry.args.last?.type, .stringArray, "menubar.click menuPath argument type")
   expectEqual(clickEntry.args.last?.minItems, 1, "menubar.click menuPath minimum")
@@ -1595,16 +1604,17 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
     state: FunctionRuntimeState(enabledFunctionNames: ["menubar.open"]),
     coordinator: AXPermissionCoordinator(rules: [appControlRule])
   )
-  let missingOpenTitle: Envelope<EmptyPayload> = try send(
+  let openedByAppName: Envelope<FunctionRunPayload> = try send(
     AgentRequest(
-      id: "menubar_open_missing_title",
+      id: "menubar_open_by_app_name",
       action: "functions.run",
-      params: AgentRequestParams(functionName: "menubar.open", args: ["appName": .string("Status Owner")])
+      params: AgentRequestParams(functionName: "menubar.open", args: ["appName": .string(" Status Owner ")])
     ),
     to: openHandler
   )
-  expect(!missingOpenTitle.ok, "menubar.open without title should fail")
-  expectEqual(missingOpenTitle.error?.code, "invalid_args", "menubar.open missing title validation code")
+  expect(openedByAppName.ok, "menubar.open without title should open the app's single status item")
+  expectEqual(extras.openedTitles.last, "VPN", "menubar.open by appName alone should open the only status item")
+  expectEqual(extras.openedTargets.last?.pid, statusApp.pid, "menubar.open by appName alone must target the owner PID")
 
   let opened: Envelope<FunctionRunPayload> = try send(
     AgentRequest(
@@ -1808,6 +1818,254 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
   expect(!stoppedResult.ok, "menubar.list must reject a non-running filtered app")
   expectEqual(stoppedResult.error?.code, "app_not_found", "non-running menu bar owner error code")
   expectEqual(stoppedPrompter.count, 0, "non-running menu bar owner must not prompt for access")
+}
+
+func verifyWindowAndMenuFunctions(configuration: AgentConfiguration, screenshot: CapturedImage) throws {
+  print("Verifier: window and menu functions")
+  let targetApp = ApplicationDescriptor(
+    bundleID: "com.example.TargetApp",
+    appName: "Target App",
+    pid: 8200,
+    frontmost: false
+  )
+  let resolver = FakeApplicationResolver(running: [targetApp])
+  let menus = RecordingMenuService()
+  let windows = RecordingWindowService()
+  let registry = FunctionRegistry.standard(
+    applicationResolver: resolver,
+    menuBarExtras: RecordingMenuBarExtrasService(),
+    appMenus: menus,
+    windows: windows
+  )
+  let observeRule = AXAppPermissionRule(bundleID: targetApp.bundleID, appName: targetApp.appName, mode: .observe)
+  let controlRule = AXAppPermissionRule(bundleID: targetApp.bundleID, appName: targetApp.appName, mode: .control)
+
+  func makeHandler(
+    state: FunctionRuntimeState,
+    coordinator: AXPermissionCoordinator,
+    accessibility: PermissionState = .granted
+  ) -> AgentRequestHandler {
+    AgentRequestHandler(
+      configuration: configuration,
+      permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: accessibility)),
+      screenshots: FakeScreenshotService(capturedImage: screenshot),
+      functionRegistry: registry,
+      functionState: state,
+      automationPermissions: FakeAutomationPermissionService(status: .authorized),
+      axPermissionCoordinator: coordinator,
+      axTargetResolver: FakeAXTargetResolver()
+    )
+  }
+
+  // Catalog classification: lists are reads, mutations are writes.
+  let catalogHandler = makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator())
+  let catalog: Envelope<FunctionListPayload> = try send(
+    AgentRequest(id: "window_menu_catalog", action: "functions.list", params: AgentRequestParams()),
+    to: catalogHandler
+  )
+  guard let entries = catalog.data?.functions else {
+    throw NSError(domain: "ProtocolVerifier", code: 30, userInfo: [NSLocalizedDescriptionKey: "Catalog missing"])
+  }
+  func entry(_ name: String) throws -> FunctionCatalogEntry {
+    guard let entry = entries.first(where: { $0.name == name }) else {
+      throw NSError(domain: "ProtocolVerifier", code: 31, userInfo: [NSLocalizedDescriptionKey: "Missing function \(name)"])
+    }
+    return entry
+  }
+  expectEqual(try entry("menu.list").tier, .read, "menu.list should be Tier 1")
+  expectEqual(try entry("menu.click").tier, .write, "menu.click should be Tier 2")
+  expectEqual(try entry("window.list").tier, .read, "window.list should be Tier 1")
+  for name in ["window.close", "window.minimize", "window.zoom", "window.raise"] {
+    expectEqual(try entry(name).tier, .write, "\(name) should be Tier 2")
+    expectEqual(try entry(name).permissionTarget, nil, "\(name) must be a dynamic app function")
+  }
+  expectEqual(try entry("menu.click").args.map(\.name), ["appName", "title", "path", "menu"], "menu.click argument schema")
+  expectEqual(try entry("window.close").args.map(\.name), ["appName", "title"], "window.close argument schema")
+  expectEqual(try entry("window.close").args.first(where: { $0.name == "title" })?.required, false, "window.close title must be optional")
+
+  // menu.list resolves the running app and requires Observe.
+  let menuListDenied: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "menu_list_denied", action: "functions.run", params: AgentRequestParams(functionName: "menu.list", args: ["appName": .string("Target App")])),
+    to: makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .notNow)))
+  )
+  expect(!menuListDenied.ok, "menu.list should require Observe")
+  expectEqual(menuListDenied.error?.code, "app_permission_required", "menu.list permission code")
+
+  let menuListHandler = makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator(rules: [observeRule]))
+  let menuList: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "menu_list", action: "functions.run", params: AgentRequestParams(functionName: "menu.list", args: ["appName": .string("  target  ")])),
+    to: menuListHandler
+  )
+  expect(menuList.ok, "authorized menu.list should run")
+  expectEqual(menus.listAppNames.last ?? nil, "Target App", "menu.list must dispatch the resolved app name")
+  guard let menuListValue = menuList.data?.result.value,
+        case .object(let menuListObject) = menuListValue,
+        case .array(let menuItems)? = menuListObject["items"],
+        case .object(let firstMenu)? = menuItems.first else {
+    throw NSError(domain: "ProtocolVerifier", code: 32, userInfo: [NSLocalizedDescriptionKey: "Unexpected menu.list result"])
+  }
+  expectEqual(firstMenu["title"], .string("File"), "menu.list item title")
+  expectEqual(firstMenu["hasSubmenu"], .bool(true), "menu.list item hasSubmenu")
+
+  // menu.click is disabled by default and requires Control.
+  let menuClickDisabled: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "menu_click_disabled",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menu.click", args: ["appName": .string("Target App"), "path": .array([.string("File")])])
+    ),
+    to: makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator(rules: [controlRule]))
+  )
+  expect(!menuClickDisabled.ok, "menu.click should be disabled by default")
+  expectEqual(menuClickDisabled.error?.code, "function_disabled", "menu.click default-enable code")
+
+  let menuClickHandler = makeHandler(
+    state: FunctionRuntimeState(enabledFunctionNames: ["menu.click"]),
+    coordinator: AXPermissionCoordinator(rules: [controlRule])
+  )
+
+  let menuClickObserveOnly: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "menu_click_observe_only",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menu.click", args: ["appName": .string("Target App"), "path": .array([.string("File")])])
+    ),
+    to: makeHandler(
+      state: FunctionRuntimeState(enabledFunctionNames: ["menu.click"]),
+      coordinator: AXPermissionCoordinator(rules: [observeRule], prompter: FakePermissionPrompter(response: .notNow))
+    )
+  )
+  expect(!menuClickObserveOnly.ok, "Observe must not permit menu.click")
+  expectEqual(menuClickObserveOnly.error?.code, "app_permission_required", "menu.click Control permission code")
+
+  let clickedByPath: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menu_click_path",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menu.click", args: ["appName": .string("Target App"), "path": .array([.string(" View "), .string(" Enter Full Screen ")])])
+    ),
+    to: menuClickHandler
+  )
+  expect(clickedByPath.ok, "authorized menu.click should run")
+  expectEqual(menus.clickPaths.last, ["View", "Enter Full Screen"], "menu.click should normalize an explicit path")
+
+  let clickedByTitlePath: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menu_click_title_path",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menu.click", args: ["appName": .string("Target App"), "title": .string("View > Enter Full Screen")])
+    ),
+    to: menuClickHandler
+  )
+  expect(clickedByTitlePath.ok, "menu.click should accept a title path")
+  expectEqual(menus.clickPaths.last, ["View", "Enter Full Screen"], "menu.click should split a title path on >")
+
+  let clickedByMenuTitle: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menu_click_menu_title",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menu.click", args: ["appName": .string("Target App"), "menu": .string("File"), "title": .string("New")])
+    ),
+    to: menuClickHandler
+  )
+  expect(clickedByMenuTitle.ok, "menu.click should accept menu + title")
+  expectEqual(menus.clickPaths.last, ["File", "New"], "menu.click should combine menu and title into a path")
+
+  let invalidMenuClicks: [(String, [String: JSONValue])] = [
+    ("missing_target", ["appName": .string("Target App")]),
+    ("empty_path", ["appName": .string("Target App"), "path": .array([])]),
+    ("wrong_path_type", ["appName": .string("Target App"), "path": .string("File")]),
+    ("missing_app", ["path": .array([.string("File")])])
+  ]
+  for (suffix, args) in invalidMenuClicks {
+    let invalid: Envelope<EmptyPayload> = try send(
+      AgentRequest(id: "menu_click_\(suffix)", action: "functions.run", params: AgentRequestParams(functionName: "menu.click", args: args)),
+      to: menuClickHandler
+    )
+    expect(!invalid.ok, "menu.click \(suffix) should fail validation")
+    expectEqual(invalid.error?.code, "invalid_args", "menu.click \(suffix) validation code")
+  }
+
+  // window.list resolves the running app and requires Observe.
+  let windowListHandler = makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator(rules: [observeRule]))
+  let windowList: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "window_list", action: "functions.run", params: AgentRequestParams(functionName: "window.list", args: ["appName": .string("Target App")])),
+    to: windowListHandler
+  )
+  expect(windowList.ok, "authorized window.list should run")
+  expectEqual(windows.listAppNames.last ?? nil, "Target App", "window.list must dispatch the resolved app name")
+  guard let windowListValue = windowList.data?.result.value,
+        case .object(let windowListObject) = windowListValue,
+        case .array(let windowItems)? = windowListObject["windows"],
+        case .object(let firstWindow)? = windowItems.first else {
+    throw NSError(domain: "ProtocolVerifier", code: 33, userInfo: [NSLocalizedDescriptionKey: "Unexpected window.list result"])
+  }
+  expectEqual(firstWindow["title"], .string("Untitled"), "window.list window title")
+  expectEqual(firstWindow["role"], .string("AXWindow"), "window.list window role")
+
+  // Window mutations are disabled by default and require Control.
+  let windowCloseDisabled: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "window_close_disabled",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "window.close", args: ["appName": .string("Target App")])
+    ),
+    to: makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator(rules: [controlRule]))
+  )
+  expect(!windowCloseDisabled.ok, "window.close should be disabled by default")
+  expectEqual(windowCloseDisabled.error?.code, "function_disabled", "window.close default-enable code")
+
+  let windowHandler = makeHandler(
+    state: FunctionRuntimeState(enabledFunctionNames: ["window.close", "window.minimize", "window.zoom", "window.raise"]),
+    coordinator: AXPermissionCoordinator(rules: [controlRule])
+  )
+
+  let windowCloseObserveOnly: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "window_close_observe_only",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "window.close", args: ["appName": .string("Target App")])
+    ),
+    to: makeHandler(
+      state: FunctionRuntimeState(enabledFunctionNames: ["window.close"]),
+      coordinator: AXPermissionCoordinator(rules: [observeRule], prompter: FakePermissionPrompter(response: .notNow))
+    )
+  )
+  expect(!windowCloseObserveOnly.ok, "Observe must not permit window.close")
+  expectEqual(windowCloseObserveOnly.error?.code, "app_permission_required", "window.close Control permission code")
+
+  let windowActions: [(String, String)] = [
+    ("window.close", "window.close"),
+    ("window.minimize", "window.minimize"),
+    ("window.zoom", "window.zoom"),
+    ("window.raise", "window.raise")
+  ]
+  for (name, expectedAction) in windowActions {
+    let result: Envelope<FunctionRunPayload> = try send(
+      AgentRequest(
+        id: "\(name)_run",
+        action: "functions.run",
+        params: AgentRequestParams(functionName: name, args: ["appName": .string(" Target App "), "title": .string(" Untitled ")])
+      ),
+      to: windowHandler
+    )
+    expect(result.ok, "authorized \(name) should run")
+    expectEqual(windows.actions.last, RecordingWindowService.RecordedAction(action: expectedAction, appName: "Target App", title: "Untitled"), "\(name) must dispatch the resolved app and normalized title")
+  }
+
+  let windowCloseMissingApp: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "window_close_missing_app", action: "functions.run", params: AgentRequestParams(functionName: "window.close", args: ["title": .string("Untitled")])),
+    to: windowHandler
+  )
+  expect(!windowCloseMissingApp.ok, "window.close without appName should fail validation")
+  expectEqual(windowCloseMissingApp.error?.code, "invalid_args", "window.close missing appName code")
+
+  let windowCloseMissingWindow: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "window_close_missing_window", action: "functions.run", params: AgentRequestParams(functionName: "window.close", args: ["appName": .string("Target App"), "title": .string("Missing")])),
+    to: windowHandler
+  )
+  expect(!windowCloseMissingWindow.ok, "window.close should propagate a missing-window failure")
+  expectEqual(windowCloseMissingWindow.error?.code, "element_not_found", "window.close missing window code")
 }
 
 func verifyStoredTemplateReviewAndOutputBounds() throws {
@@ -3036,25 +3294,34 @@ final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Se
     return AXMenuBarExtrasListPayload(items: items)
   }
 
-  func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String) throws -> AXMenuBarExtraOpenPayload {
-    switch title {
-    case "Disabled":
-      throw AgentProtocolError.actionFailed("Status item is disabled")
-    case "Missing":
-      throw AgentProtocolError.elementNotFound("Status item is missing")
-    case "Ambiguous":
-      throw AgentProtocolError.invalidRequest("Multiple status items match")
-    default:
-      break
+  func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String?) throws -> AXMenuBarExtraOpenPayload {
+    let item = statusItem(for: app)
+    if let title {
+      switch title {
+      case "Disabled":
+        throw AgentProtocolError.actionFailed("Status item is disabled")
+      case "Missing":
+        throw AgentProtocolError.elementNotFound("Status item is missing")
+      case "Ambiguous":
+        throw AgentProtocolError.invalidRequest("Multiple status items match")
+      default:
+        break
+      }
+      try requireMatchingStatusItem(title, for: app)
+      lock.lock()
+      storedOpenedTargets.append(app)
+      storedOpenedTitles.append(title)
+      lock.unlock()
+    } else {
+      // Opening by app alone succeeds when the owner exposes exactly one item.
+      lock.lock()
+      storedOpenedTargets.append(app)
+      storedOpenedTitles.append(item.title ?? item.label ?? item.description ?? "<untitled>")
+      lock.unlock()
     }
-    try requireMatchingStatusItem(title, for: app)
-    lock.lock()
-    storedOpenedTargets.append(app)
-    storedOpenedTitles.append(title)
-    lock.unlock()
     return AXMenuBarExtraOpenPayload(
       appName: app.appName,
-      statusItem: statusItem(for: app),
+      statusItem: item,
       menuItems: [
         AXElementNode(
           role: "AXMenuItem", subrole: nil, title: "Settings…", label: nil, identifier: "settings",
@@ -3141,6 +3408,135 @@ final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Se
       description: "Acme VPN status menu",
       enabled: true,
       frame: CaptureRect(x: 1200, y: 0, width: 24, height: 24)
+    )
+  }
+}
+
+final class RecordingMenuService: AppMenuServicing, @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedListAppNames: [String?] = []
+  private var storedClickAppNames: [String?] = []
+  private var storedClickPaths: [[String]] = []
+
+  var listAppNames: [String?] {
+    lock.lock(); defer { lock.unlock() }
+    return storedListAppNames
+  }
+
+  var clickAppNames: [String?] {
+    lock.lock(); defer { lock.unlock() }
+    return storedClickAppNames
+  }
+
+  var clickPaths: [[String]] {
+    lock.lock(); defer { lock.unlock() }
+    return storedClickPaths
+  }
+
+  func listMenuItems(appName: String?) throws -> AXAppMenuListPayload {
+    lock.lock()
+    storedListAppNames.append(appName)
+    lock.unlock()
+    return AXAppMenuListPayload(
+      appName: appName ?? "TextEdit",
+      items: [
+        AXAppMenuItemPayload(title: "File", enabled: true, hasSubmenu: true, path: ["File"]),
+        AXAppMenuItemPayload(title: "Edit", enabled: true, hasSubmenu: true, path: ["Edit"]),
+        AXAppMenuItemPayload(title: "View", enabled: false, hasSubmenu: true, path: ["View"])
+      ]
+    )
+  }
+
+  func clickMenuItem(appName: String?, path: [String]) throws -> AXMenuActionPayload {
+    if path.last == "Missing" {
+      throw AgentProtocolError.elementNotFound("Menu item 'Missing' not found")
+    }
+    lock.lock()
+    storedClickAppNames.append(appName)
+    storedClickPaths.append(path)
+    lock.unlock()
+    return AXMenuActionPayload(
+      action: "ax.menu-navigate",
+      appName: appName ?? "TextEdit",
+      path: path,
+      item: AXElementNode(
+        role: "AXMenuItem", subrole: nil, title: path.last, label: nil, identifier: nil,
+        value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil
+      )
+    )
+  }
+}
+
+final class RecordingWindowService: WindowServicing, @unchecked Sendable {
+  struct RecordedAction: Equatable {
+    let action: String
+    let appName: String
+    let title: String?
+  }
+
+  private let lock = NSLock()
+  private var storedListAppNames: [String?] = []
+  private var storedActions: [RecordedAction] = []
+
+  var listAppNames: [String?] {
+    lock.lock(); defer { lock.unlock() }
+    return storedListAppNames
+  }
+
+  var actions: [RecordedAction] {
+    lock.lock(); defer { lock.unlock() }
+    return storedActions
+  }
+
+  func listWindows(appName: String?) throws -> AXWindowCatalogPayload {
+    lock.lock()
+    storedListAppNames.append(appName)
+    lock.unlock()
+    return AXWindowCatalogPayload(windows: [
+      AXWindowCatalogItemPayload(
+        appName: appName ?? "TextEdit",
+        bundleID: "com.apple.TextEdit",
+        pid: 4242,
+        index: 0,
+        title: "Untitled",
+        role: "AXWindow",
+        subrole: "AXStandardWindow",
+        frame: CaptureRect(x: 10, y: 10, width: 400, height: 300),
+        main: true
+      )
+    ])
+  }
+
+  func closeWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
+    try record("window.close", appName: appName, title: title)
+  }
+
+  func minimizeWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
+    try record("window.minimize", appName: appName, title: title)
+  }
+
+  func zoomWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
+    try record("window.zoom", appName: appName, title: title)
+  }
+
+  func raiseWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
+    try record("window.raise", appName: appName, title: title)
+  }
+
+  private func record(_ action: String, appName: String, title: String?) throws -> AXWindowActionPayload {
+    if title == "Missing" {
+      throw AgentProtocolError.elementNotFound("No window matches 'Missing'")
+    }
+    lock.lock()
+    storedActions.append(RecordedAction(action: action, appName: appName, title: title))
+    lock.unlock()
+    return AXWindowActionPayload(
+      action: action,
+      appName: appName,
+      bundleID: "com.apple.TextEdit",
+      pid: 4242,
+      index: 0,
+      title: title ?? "Untitled"
     )
   }
 }

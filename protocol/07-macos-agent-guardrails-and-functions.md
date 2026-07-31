@@ -176,6 +176,8 @@ A Tier-1 function is *catalog-enabled* by default, but it is **not permission-en
 | `app.list` | Application Discovery | NSWorkspace running app list |
 | `app.is-running` | requested app bundle | name resolves uniquely before status is returned |
 | `menubar.list` | Menu Bar Extras without `appName`; requested owner app with `appName` | Native AX enumeration of `AXExtrasMenuBar` status items |
+| `menu.list` | requested app (or frontmost app without `appName`) | Native AX enumeration of top-level menu bar items (title, enabled, hasSubmenu, path) |
+| `window.list` | requested app (or frontmost app without `appName`) | Native AX window enumeration (title, index, role, frame, main) |
 | `system.get-volume` | System Audio | fixed AppleScript volume/mute state |
 | `system.get-clipboard` | Clipboard | plain text only |
 | `system.get-battery` | Power & Battery | IOKit capacity/charging |
@@ -190,6 +192,9 @@ A Tier-1 function is *catalog-enabled* by default, but it is **not permission-en
 | --- | --- | --- |
 | `app.launch` / `app.activate` / `app.quit` | requested app bundle | `quit` remains graceful only |
 | `menubar.open` / `menubar.click` | running owner app | Native AX popup opening/navigation; status item title can match AX title, description, label, or identifier |
+| `menu.click` | running app | Native AX menu navigation/press by title or path; no coordinates |
+| `window.close` / `window.minimize` / `window.zoom` | running app | Presses the window's AX close/minimize/zoom button |
+| `window.raise` | running app | `AXRaise` on the window plus app activation |
 | `system.set-volume` / `system.mute` | System Audio | fixed bounded input |
 | `system.set-clipboard` | Clipboard | plain text only |
 | `system.notify` | Notifications | fixed OkBrain Agent branding |
@@ -209,8 +214,17 @@ These are catalog functions, not new `ax.*` protocol actions. Discover their exa
 ```
 
 - All three functions also require the process-level macOS **Accessibility** grant. Omitting `appName` from `menubar.list` enumerates eligible running apps that expose `AXExtrasMenuBar` and requires the global **Menu Bar Extras** Observe grant. Supplying `appName` limits the read to one currently running, app-authorized owner: resolution tries an exact localized name first, then a unique case-insensitive partial localized-name match; ambiguous owner names return `invalid_request`.
-- `menubar.open` requires `{ appName, title }`, Control for that owner app, and returns the opened popup's top-level items. `title` is normalized and matched case-insensitively against AX title, AX description, AX label, and AX identifier, with exact matches considered before contains matches; ambiguous matches fail and status-item errors list the visible candidates.
+- `menubar.open` requires `{ appName }` plus an optional `title`, Control for that owner app, and returns the opened popup's top-level items. When `title` is omitted the owner must expose exactly one status item (otherwise the error lists the available items). When present, `title` is normalized and matched case-insensitively against AX title, AX description, AX label, and AX identifier, with exact matches considered before contains matches; ambiguous matches fail and status-item errors list the visible candidates.
 - `menubar.click` requires `{ appName, title, menuPath }`, where `menuPath` is a non-empty array of non-empty strings such as `["Settings…", "General"]`. It opens the status item, navigates the hierarchy, presses the final item, and returns the normalized path.
+
+### 3.2.2 Menus and windows
+
+These catalog functions give calling agents declarative, coordinate-free GUI operations. All of them require the process-level macOS **Accessibility** grant and resolve their app target to a bundle ID before dispatch; discover exact schemas through `functions.list`.
+
+- `menu.list` takes an optional `appName` (defaulting to the frontmost app) and returns the top-level menu bar items with `title`, `enabled`, `hasSubmenu`, and the `path` accepted by `menu.click`.
+- `menu.click` requires `appName` and either `title` or `path` (plus an optional top-level `menu`). A `title` containing `>` is split into a path (for example `"View > Enter Full Screen"`); `menu` + `title` combine into `[menu, title]`. It opens the menus with `AXShowMenu` and presses the final item with `AXPress`—no coordinates.
+- `window.list` takes an optional `appName` filter (defaulting to the frontmost app) and returns each window's `appName`, `title`, `index`, `role`, `subrole`, `frame`, and `main` flag.
+- `window.close`, `window.minimize`, and `window.zoom` require `appName` and an optional case-insensitive `title` substring (defaulting to the app's main window) and press the window's AX close/minimize/zoom button. `window.raise` performs `AXRaise` and activates the owning app. Window-targeting failures list the available window titles.
 
 **Tier 3 — elevated (off by default + explicit Control):**
 
