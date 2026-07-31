@@ -405,6 +405,7 @@ private enum CuratedFunctionFactory {
     [
       appList(),
       appIsRunning(applicationResolver: applicationResolver),
+      displayInfo(),
       menuBarList(applicationResolver: applicationResolver, menuBarExtras: menuBarExtras),
       systemGetVolume(executor: executor),
       systemGetClipboard(),
@@ -424,6 +425,7 @@ private enum CuratedFunctionFactory {
       menuList(applicationResolver: applicationResolver, appMenus: appMenus),
       menuClick(applicationResolver: applicationResolver, appMenus: appMenus),
       windowList(applicationResolver: applicationResolver, windows: windows),
+      windowFrame(applicationResolver: applicationResolver, windows: windows),
       windowAction(name: "window.close", applicationResolver: applicationResolver, windows: windows) { service, appName, title in
         try service.closeWindow(appName: appName, title: title)
       },
@@ -544,6 +546,40 @@ private enum CuratedFunctionFactory {
         "running", .bool(app != nil),
         "app", app.map(appJSON) ?? .null
       ))
+    }
+  }
+
+  private static func displayInfo() -> any MacOSFunction {
+    ClosureFunction(
+      name: "display.info",
+      summary: "List connected displays with geometry in screen POINTS (NSScreen.frame, bottom-left origin) and backing scale (pixels per point). Multiply points by scale to map to screenshot pixels. Note AX frames and CGEvent clicks use a top-left origin, so flip y against the main display height when converting.",
+      tier: .read,
+      catalogPermissionTarget: GlobalPermissionCategory.display.permissionTarget,
+      planBuilder: { args in
+        FunctionExecutionPlan(
+          args: try validateFunctionArgs(args, schema: []),
+          permissionTarget: GlobalPermissionCategory.display.permissionTarget
+        )
+      }
+    ) { _ in
+      let screens = NSScreen.screens
+      let mainDisplayID = screens.first.flatMap { displayID(for: $0) }
+      let displays = screens.map { screen -> JSONValue in
+        let frame = screen.frame
+        let id = displayID(for: screen)
+        return .object(
+          "id", id.map { .number(Double($0)) } ?? .null,
+          "isMain", .bool(id != nil && id == mainDisplayID),
+          "frame", .object(
+            "x", .number(frame.origin.x),
+            "y", .number(frame.origin.y),
+            "width", .number(frame.size.width),
+            "height", .number(frame.size.height)
+          ),
+          "scale", .number(screen.backingScaleFactor)
+        )
+      }
+      return FunctionResult(value: .object("displays", .array(displays)))
     }
   }
 
@@ -764,6 +800,38 @@ private enum CuratedFunctionFactory {
     ) { plan in
       let appName = plan.args["appName"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
       return try functionResult(from: windows.listWindows(appName: appName))
+    }
+  }
+
+  private static func windowFrame(
+    applicationResolver: ApplicationResolving,
+    windows: WindowServicing
+  ) -> any MacOSFunction {
+    let schema = [
+      FunctionArg(name: "appName", type: .string, required: true, description: "Running application that owns the window", maxLength: 255),
+      FunctionArg(name: "title", type: .string, required: false, description: "Window title substring (case-insensitive). Omit for the app's main/front window.", maxLength: 500)
+    ]
+    return ClosureFunction(
+      name: "window.frame",
+      summary: "Read a window's on-screen position and size in global screen POINTS (AX top-left origin, the same coordinate space CGEvent clicks use). The title is an optional case-insensitive substring; a mismatch lists the available window titles.",
+      tier: .read,
+      requiresAccessibility: true,
+      argSchema: schema,
+      planBuilder: { args in
+        var validated = try validateFunctionArgs(args, schema: schema)
+        let appName = try requiredMenuBarExtraArgument(validated["appName"]?.stringValue, name: "appName")
+        let title = validated["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let target = try runningAppFunctionTarget(named: appName, resolver: applicationResolver)
+        validated["appName"] = .string(appName)
+        validated["title"] = title.map(JSONValue.string) ?? .null
+        return FunctionExecutionPlan(args: validated, target: target)
+      }
+    ) { plan in
+      guard let appName = plan.args["appName"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty else {
+        throw AgentProtocolError.functionFailed("window.frame did not receive a validated appName", details: nil)
+      }
+      let title = plan.args["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+      return try functionResult(from: windows.windowFrame(appName: appName, title: title))
     }
   }
 
@@ -1598,6 +1666,12 @@ private func appJSON(_ app: ApplicationDescriptor) -> JSONValue {
     "pid", app.pid.map { .number(Double($0)) } ?? .null,
     "frontmost", .bool(app.frontmost)
   )
+}
+
+/// The Core Graphics display ID backing an NSScreen, used as a stable display
+/// identifier and to detect the main (menu bar) display.
+private func displayID(for screen: NSScreen) -> Int? {
+  (screen.deviceDescription[NSDeviceDescriptionKey(rawValue: "NSScreenNumber")] as? NSNumber)?.intValue
 }
 
 private func requiredMenuBarExtraArgument(_ raw: String?, name: String) throws -> String {

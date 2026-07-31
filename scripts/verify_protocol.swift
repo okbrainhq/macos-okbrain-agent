@@ -1196,7 +1196,8 @@ func verifyGlobalPermissionCategories(configuration: AgentConfiguration, screens
     ("system.mute", ["muted": .bool(false)], .systemAudio),
     ("system.set-clipboard", ["text": .string("test")], .clipboard),
     ("system.notify", ["message": .string("test")], .notifications),
-    ("dialog.ask-user", ["message": .string("test")], .dialogs)
+    ("dialog.ask-user", ["message": .string("test")], .dialogs),
+    ("display.info", [:], .display)
   ]
   for (name, args, expectedCategory) in mappings {
     guard let function = registry.function(named: name, state: catalogState) else {
@@ -1235,6 +1236,7 @@ func verifyGlobalPermissionCategories(configuration: AgentConfiguration, screens
     "menu.list",
     "menu.click",
     "window.list",
+    "window.frame",
     "window.close",
     "window.minimize",
     "window.zoom",
@@ -1875,6 +1877,12 @@ func verifyWindowAndMenuFunctions(configuration: AgentConfiguration, screenshot:
   expectEqual(try entry("menu.list").tier, .read, "menu.list should be Tier 1")
   expectEqual(try entry("menu.click").tier, .write, "menu.click should be Tier 2")
   expectEqual(try entry("window.list").tier, .read, "window.list should be Tier 1")
+  expectEqual(try entry("window.frame").tier, .read, "window.frame should be Tier 1")
+  expectEqual(try entry("window.frame").permissionTarget, nil, "window.frame must be a dynamic app function")
+  expectEqual(try entry("window.frame").args.map(\.name), ["appName", "title"], "window.frame argument schema")
+  expectEqual(try entry("window.frame").args.first(where: { $0.name == "title" })?.required, false, "window.frame title must be optional")
+  expectEqual(try entry("display.info").tier, .read, "display.info should be Tier 1")
+  expectEqual(try entry("display.info").permissionTarget?.identifier, GlobalPermissionCategory.display.rawValue, "display.info global category")
   for name in ["window.close", "window.minimize", "window.zoom", "window.raise"] {
     expectEqual(try entry(name).tier, .write, "\(name) should be Tier 2")
     expectEqual(try entry(name).permissionTarget, nil, "\(name) must be a dynamic app function")
@@ -2002,6 +2010,82 @@ func verifyWindowAndMenuFunctions(configuration: AgentConfiguration, screenshot:
   }
   expectEqual(firstWindow["title"], .string("Untitled"), "window.list window title")
   expectEqual(firstWindow["role"], .string("AXWindow"), "window.list window role")
+
+  // window.frame resolves the running app, requires Observe, and returns the
+  // window geometry in screen points.
+  let windowFrameHandler = makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator(rules: [observeRule]))
+  let windowFrameDenied: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "window_frame_denied", action: "functions.run", params: AgentRequestParams(functionName: "window.frame", args: ["appName": .string("Target App")])),
+    to: makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .notNow)))
+  )
+  expect(!windowFrameDenied.ok, "window.frame should require Observe")
+  expectEqual(windowFrameDenied.error?.code, "app_permission_required", "window.frame permission code")
+
+  let windowFrame: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "window_frame", action: "functions.run", params: AgentRequestParams(functionName: "window.frame", args: ["appName": .string(" Target App "), "title": .string(" Untitled ")])),
+    to: windowFrameHandler
+  )
+  expect(windowFrame.ok, "authorized window.frame should run")
+  expectEqual(
+    windows.frameRequests.last,
+    RecordingWindowService.RecordedFrameRequest(appName: "Target App", title: "Untitled"),
+    "window.frame must dispatch the resolved app and normalized title"
+  )
+  guard let windowFrameValue = windowFrame.data?.result.value,
+        case .object(let windowFrameObject) = windowFrameValue,
+        case .object(let windowFrameRect)? = windowFrameObject["frame"] else {
+    throw NSError(domain: "ProtocolVerifier", code: 36, userInfo: [NSLocalizedDescriptionKey: "Unexpected window.frame result"])
+  }
+  expectEqual(windowFrameObject["appName"], .string("Target App"), "window.frame appName")
+  expectEqual(windowFrameRect["width"], .number(1200), "window.frame width in points")
+  expectEqual(windowFrameRect["height"], .number(800), "window.frame height in points")
+
+  let windowFrameMissingApp: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "window_frame_missing_app", action: "functions.run", params: AgentRequestParams(functionName: "window.frame", args: ["title": .string("Untitled")])),
+    to: windowFrameHandler
+  )
+  expect(!windowFrameMissingApp.ok, "window.frame without appName should fail validation")
+  expectEqual(windowFrameMissingApp.error?.code, "invalid_args", "window.frame missing appName code")
+
+  let windowFrameMissingWindow: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "window_frame_missing_window", action: "functions.run", params: AgentRequestParams(functionName: "window.frame", args: ["appName": .string("Target App"), "title": .string("Missing")])),
+    to: windowFrameHandler
+  )
+  expect(!windowFrameMissingWindow.ok, "window.frame should propagate a missing-window failure")
+  expectEqual(windowFrameMissingWindow.error?.code, "element_not_found", "window.frame missing window code")
+
+  // display.info is a global read gated by the Display category Observe grant.
+  let displayDenied: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "display_info_denied", action: "functions.run", params: AgentRequestParams(functionName: "display.info", args: [:])),
+    to: makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .notNow)))
+  )
+  expect(!displayDenied.ok, "display.info should require the Display Observe grant")
+  expectEqual(displayDenied.error?.code, "app_permission_required", "display.info permission code")
+
+  let displayHandler = makeHandler(
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(target: GlobalPermissionCategory.display.permissionTarget, mode: .observe)
+    ])
+  )
+  let displayInfo: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "display_info", action: "functions.run", params: AgentRequestParams(functionName: "display.info", args: [:])),
+    to: displayHandler
+  )
+  expect(displayInfo.ok, "authorized display.info should run")
+  guard let displayInfoValue = displayInfo.data?.result.value,
+        case .object(let displayInfoObject) = displayInfoValue,
+        case .array(let displays)? = displayInfoObject["displays"],
+        case .object(let firstDisplay)? = displays.first else {
+    throw NSError(domain: "ProtocolVerifier", code: 34, userInfo: [NSLocalizedDescriptionKey: "Unexpected display.info result"])
+  }
+  expect(!displays.isEmpty, "display.info should report at least one display")
+  expect((firstDisplay["scale"]?.numberValue ?? 0) >= 1, "display.info scale should be at least 1")
+  guard case .object(let displayFrame)? = firstDisplay["frame"] else {
+    throw NSError(domain: "ProtocolVerifier", code: 35, userInfo: [NSLocalizedDescriptionKey: "display.info frame missing"])
+  }
+  expect((displayFrame["width"]?.numberValue ?? 0) > 0, "display.info frame width should be positive")
+  expect((displayFrame["height"]?.numberValue ?? 0) > 0, "display.info frame height should be positive")
 
   // Window mutations are disabled by default and require Control.
   let windowCloseDisabled: Envelope<EmptyPayload> = try send(
@@ -3474,9 +3558,15 @@ final class RecordingWindowService: WindowServicing, @unchecked Sendable {
     let title: String?
   }
 
+  struct RecordedFrameRequest: Equatable {
+    let appName: String
+    let title: String?
+  }
+
   private let lock = NSLock()
   private var storedListAppNames: [String?] = []
   private var storedActions: [RecordedAction] = []
+  private var storedFrameRequests: [RecordedFrameRequest] = []
 
   var listAppNames: [String?] {
     lock.lock(); defer { lock.unlock() }
@@ -3486,6 +3576,11 @@ final class RecordingWindowService: WindowServicing, @unchecked Sendable {
   var actions: [RecordedAction] {
     lock.lock(); defer { lock.unlock() }
     return storedActions
+  }
+
+  var frameRequests: [RecordedFrameRequest] {
+    lock.lock(); defer { lock.unlock() }
+    return storedFrameRequests
   }
 
   func listWindows(appName: String?) throws -> AXWindowCatalogPayload {
@@ -3505,6 +3600,23 @@ final class RecordingWindowService: WindowServicing, @unchecked Sendable {
         main: true
       )
     ])
+  }
+
+  func windowFrame(appName: String, title: String?) throws -> AXWindowFramePayload {
+    if title == "Missing" {
+      throw AgentProtocolError.elementNotFound("No window matches 'Missing' in \(appName). Windows: [0] Untitled")
+    }
+    lock.lock()
+    storedFrameRequests.append(RecordedFrameRequest(appName: appName, title: title))
+    lock.unlock()
+    return AXWindowFramePayload(
+      appName: appName,
+      bundleID: "com.apple.TextEdit",
+      pid: 4242,
+      index: 0,
+      title: title ?? "Untitled",
+      frame: CaptureRect(x: 120, y: 80, width: 1200, height: 800)
+    )
   }
 
   func closeWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
