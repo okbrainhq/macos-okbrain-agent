@@ -52,6 +52,11 @@ public protocol WindowServicing: Sendable {
   /// Lists on-screen windows. When `appName` is nil, lists windows across all
   /// running GUI applications.
   func listWindows(appName: String?) throws -> AXWindowCatalogPayload
+  /// Resolves one window's on-screen frame in global screen points (AX top-left
+  /// origin). With a non-nil title this is a case-insensitive substring match;
+  /// on ambiguity or miss the error lists the available window titles. With no
+  /// title the main window (else the first) is used.
+  func windowFrame(appName: String, title: String?) throws -> AXWindowFramePayload
   func closeWindow(appName: String, title: String?) throws -> AXWindowActionPayload
   func minimizeWindow(appName: String, title: String?) throws -> AXWindowActionPayload
   func zoomWindow(appName: String, title: String?) throws -> AXWindowActionPayload
@@ -609,6 +614,19 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
       }
     }
     return AXWindowCatalogPayload(windows: payloads)
+  }
+
+  public func windowFrame(appName: String, title: String?) throws -> AXWindowFramePayload {
+    try requireAccessibilityTrust()
+    let resolved = try resolveWindowTarget(appName: appName, title: title)
+    return AXWindowFramePayload(
+      appName: windowAppName(resolved.app),
+      bundleID: resolved.app.bundleIdentifier,
+      pid: resolved.app.processIdentifier,
+      index: resolved.index,
+      title: stringAttribute(resolved.window, kAXTitleAttribute),
+      frame: frame(of: resolved.window)
+    )
   }
 
   public func closeWindow(appName: String, title: String?) throws -> AXWindowActionPayload {

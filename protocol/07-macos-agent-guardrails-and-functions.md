@@ -83,6 +83,7 @@ The always-available global categories are:
 | Network Information | `system.get-wifi-name` | — |
 | Notifications | — | `system.notify` |
 | User Dialogs | — | `dialog.ask-user` |
+| Displays | `display.info` | — |
 
 ### 2.3 Permission prompt (sync + async fallback)
 
@@ -113,7 +114,7 @@ Example error:
 ### 2.4 Config, persistence, UI
 
 - `AgentRuntimeStore` persists generalized `[AXAppPermissionRule]` records and exposes them as `permissionRules`.
-- **App & Global Access** always shows the eight global capability choices in its Target picker.
+- **App & Global Access** always shows the nine global capability choices in its Target picker.
 - Applications are added only through **Choose Application…**, a native `.app` file browser. The selected bundle is validated with `Bundle(url:)`, bundle ID validation, and de-duplication; a running-process list is not the permission source.
 - The rule table exposes only Observe and Control. Removing a rule revokes its matching session grant as well.
 - Timed-out requests appear in the app and menu bar with their requested intent.
@@ -178,6 +179,8 @@ A Tier-1 function is *catalog-enabled* by default, but it is **not permission-en
 | `menubar.list` | Menu Bar Extras without `appName`; requested owner app with `appName` | Native AX enumeration of `AXExtrasMenuBar` status items |
 | `menu.list` | requested app (or frontmost app without `appName`) | Native AX enumeration of top-level menu bar items (title, enabled, hasSubmenu, path) |
 | `window.list` | requested app (or frontmost app without `appName`) | Native AX window enumeration (title, index, role, frame, main) |
+| `window.frame` | requested app | One window's position/size in global screen points (AX top-left origin); title mismatch lists available windows |
+| `display.info` | Displays | Connected display geometry in screen points (NSScreen.frame, bottom-left origin) plus backing scale (pixels per point) |
 | `system.get-volume` | System Audio | fixed AppleScript volume/mute state |
 | `system.get-clipboard` | Clipboard | plain text only |
 | `system.get-battery` | Power & Battery | IOKit capacity/charging |
@@ -224,6 +227,8 @@ These catalog functions give calling agents declarative, coordinate-free GUI ope
 - `menu.list` takes an optional `appName` (defaulting to the frontmost app) and returns the top-level menu bar items with `title`, `enabled`, `hasSubmenu`, and the `path` accepted by `menu.click`.
 - `menu.click` requires `appName` and either `title` or `path` (plus an optional top-level `menu`). A `title` containing `>` is split into a path (for example `"View > Enter Full Screen"`); `menu` + `title` combine into `[menu, title]`. It opens the menus with `AXShowMenu` and presses the final item with `AXPress`—no coordinates.
 - `window.list` takes an optional `appName` filter (defaulting to the frontmost app) and returns each window's `appName`, `title`, `index`, `role`, `subrole`, `frame`, and `main` flag.
+- `window.frame` requires `appName` and an optional case-insensitive `title` substring (defaulting to the app's main/front window) and returns that window's `frame` (`x`, `y`, `width`, `height`) in global screen **points** — the AX top-left origin coordinate space that `CGEvent` clicks use. A title mismatch lists the available window titles.
+- `display.info` takes no arguments and returns every connected display's `id`, `isMain`, `frame` (in screen **points**, `NSScreen.frame` bottom-left origin), and `scale` (backing scale factor, pixels per point). Multiply points by `scale` to map to screenshot pixels; because AX frames and `CGEvent` clicks use a top-left origin while `NSScreen.frame` uses a bottom-left origin, flip `y` against the main display height when converting between the two.
 - `window.close`, `window.minimize`, and `window.zoom` require `appName` and an optional case-insensitive `title` substring (defaulting to the app's main window) and press the window's AX close/minimize/zoom button. `window.raise` performs `AXRaise` and activates the owning app. Window-targeting failures list the available window titles.
 
 **Tier 3 — elevated (off by default + explicit Control):**

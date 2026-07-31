@@ -461,3 +461,24 @@ public struct AXWindowActionPayload: Codable, Equatable, Sendable {
     self.title = title
   }
 }
+
+/// Result of the curated `window.frame` function: one window's on-screen
+/// position and size in global screen **points** (the AX top-left origin
+/// coordinate space that `CGEvent` clicks use).
+public struct AXWindowFramePayload: Codable, Equatable, Sendable {
+  public let appName: String
+  public let bundleID: String?
+  public let pid: Int32
+  public let index: Int
+  public let title: String?
+  public let frame: CaptureRect?
+
+  public init(appName: String, bundleID: String?, pid: Int32, index: Int, title: String?, frame: CaptureRect?) {
+    self.appName = appName
+    self.bundleID = bundleID
+    self.pid = pid
+    self.index = index
+    self.title = title
+    self.frame = frame
+  }
+}

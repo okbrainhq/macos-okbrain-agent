@@ -75,6 +75,7 @@ public enum GlobalPermissionCategory: String, Codable, CaseIterable, Equatable, 
   case network
   case notifications
   case dialogs
+  case display
 
   public var id: String { rawValue }
 
@@ -88,6 +89,7 @@ public enum GlobalPermissionCategory: String, Codable, CaseIterable, Equatable, 
     case .network: "Network Information"
     case .notifications: "Notifications"
     case .dialogs: "User Dialogs"
+    case .display: "Displays"
     }
   }
 
@@ -101,6 +103,7 @@ public enum GlobalPermissionCategory: String, Codable, CaseIterable, Equatable, 
     case .network: "Read the current Wi-Fi network name."
     case .notifications: "Show notifications branded as OkBrain Agent."
     case .dialogs: "Show local OkBrain Agent dialogs and return the response."
+    case .display: "Read connected display geometry and scale factors."
     }
   }
 
@@ -114,6 +117,7 @@ public enum GlobalPermissionCategory: String, Codable, CaseIterable, Equatable, 
     case .network: "wifi"
     case .notifications: "bell"
     case .dialogs: "text.bubble"
+    case .display: "display"
     }
   }
 
