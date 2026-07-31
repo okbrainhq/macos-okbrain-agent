@@ -209,14 +209,18 @@ public final class FunctionRegistry: @unchecked Sendable {
 
   public static func standard(
     applicationResolver: ApplicationResolving = SystemApplicationResolver(),
-    menuBarExtras: MenuBarExtrasServicing = SystemAccessibilityService()
+    menuBarExtras: MenuBarExtrasServicing = SystemAccessibilityService(),
+    appMenus: AppMenuServicing = SystemAccessibilityService(),
+    windows: WindowServicing = SystemAccessibilityService()
   ) -> FunctionRegistry {
     let executor = FixedAppleScriptExecutor()
     return FunctionRegistry(
       functions: CuratedFunctionFactory.makeFunctions(
         executor: executor,
         applicationResolver: applicationResolver,
-        menuBarExtras: menuBarExtras
+        menuBarExtras: menuBarExtras,
+        appMenus: appMenus,
+        windows: windows
       ),
       executor: executor
     )
@@ -394,7 +398,9 @@ private enum CuratedFunctionFactory {
   static func makeFunctions(
     executor: FixedAppleScriptExecutor,
     applicationResolver: ApplicationResolving,
-    menuBarExtras: MenuBarExtrasServicing
+    menuBarExtras: MenuBarExtrasServicing,
+    appMenus: AppMenuServicing,
+    windows: WindowServicing
   ) -> [any MacOSFunction] {
     [
       appList(),
@@ -415,6 +421,21 @@ private enum CuratedFunctionFactory {
       appQuit(),
       menuBarOpen(applicationResolver: applicationResolver, menuBarExtras: menuBarExtras),
       menuBarClick(applicationResolver: applicationResolver, menuBarExtras: menuBarExtras),
+      menuList(applicationResolver: applicationResolver, appMenus: appMenus),
+      menuClick(applicationResolver: applicationResolver, appMenus: appMenus),
+      windowList(applicationResolver: applicationResolver, windows: windows),
+      windowAction(name: "window.close", applicationResolver: applicationResolver, windows: windows) { service, appName, title in
+        try service.closeWindow(appName: appName, title: title)
+      },
+      windowAction(name: "window.minimize", applicationResolver: applicationResolver, windows: windows) { service, appName, title in
+        try service.minimizeWindow(appName: appName, title: title)
+      },
+      windowAction(name: "window.zoom", applicationResolver: applicationResolver, windows: windows) { service, appName, title in
+        try service.zoomWindow(appName: appName, title: title)
+      },
+      windowAction(name: "window.raise", applicationResolver: applicationResolver, windows: windows) { service, appName, title in
+        try service.raiseWindow(appName: appName, title: title)
+      },
       systemSetVolume(executor: executor),
       systemMute(executor: executor),
       systemSetClipboard(),
@@ -572,20 +593,20 @@ private enum CuratedFunctionFactory {
     applicationResolver: ApplicationResolving,
     menuBarExtras: MenuBarExtrasServicing
   ) -> any MacOSFunction {
-    let schema = menuBarStatusItemSchema()
+    let schema = menuBarStatusItemSchema(titleRequired: false)
     return ClosureFunction(
       name: "menubar.open",
-      summary: "Open a menu bar status item's popup menu.",
+      summary: "Open a menu bar status item's popup menu. Title is optional when the app has exactly one status item; a mismatching title returns the available items.",
       tier: .write,
       requiresAccessibility: true,
       argSchema: schema,
       planBuilder: { args in
         var validated = try validateFunctionArgs(args, schema: schema)
         let appName = try requiredMenuBarExtraArgument(validated["appName"]?.stringValue, name: "appName")
-        let title = try requiredMenuBarExtraArgument(validated["title"]?.stringValue, name: "title")
+        let title = validated["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         let target = try runningMenuBarExtraFunctionTarget(named: appName, resolver: applicationResolver)
         validated["appName"] = .string(appName)
-        validated["title"] = .string(title)
+        validated["title"] = title.map(JSONValue.string) ?? .null
         return FunctionExecutionPlan(args: validated, target: target)
       }
     ) { plan in
@@ -593,7 +614,7 @@ private enum CuratedFunctionFactory {
         throw AgentProtocolError.functionFailed("Menu bar extra owner was not resolved", details: nil)
       }
       let app = try currentMenuBarExtraAppTarget(for: target, resolver: applicationResolver)
-      let title = try requiredMenuBarExtraArgument(plan.args["title"]?.stringValue, name: "title")
+      let title = plan.args["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
       return try functionResult(from: menuBarExtras.openMenuBarExtra(app: app, title: title))
     }
   }
@@ -638,7 +659,160 @@ private enum CuratedFunctionFactory {
     }
   }
 
-  private static func menuBarStatusItemSchema(includeMenuPath: Bool = false) -> [FunctionArg] {
+  private static func menuList(
+    applicationResolver: ApplicationResolving,
+    appMenus: AppMenuServicing
+  ) -> any MacOSFunction {
+    let schema = [
+      FunctionArg(
+        name: "appName",
+        type: .string,
+        required: false,
+        description: "Optional running application name; defaults to the frontmost app",
+        maxLength: 255
+      )
+    ]
+    return ClosureFunction(
+      name: "menu.list",
+      summary: "List an application's top-level menu bar items (title, enabled, hasSubmenu, path). Defaults to the frontmost app.",
+      tier: .read,
+      requiresAccessibility: true,
+      argSchema: schema,
+      planBuilder: { args in
+        var validated = try validateFunctionArgs(args, schema: schema)
+        let appName = validated["appName"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let target: FunctionTarget
+        if let appName {
+          target = try runningAppFunctionTarget(named: appName, resolver: applicationResolver)
+        } else {
+          target = try frontmostAppFunctionTarget()
+        }
+        validated["appName"] = .string(target.appName)
+        return FunctionExecutionPlan(args: validated, target: target)
+      }
+    ) { plan in
+      let appName = plan.args["appName"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+      return try functionResult(from: appMenus.listMenuItems(appName: appName))
+    }
+  }
+
+  private static func menuClick(
+    applicationResolver: ApplicationResolving,
+    appMenus: AppMenuServicing
+  ) -> any MacOSFunction {
+    let schema = [
+      FunctionArg(name: "appName", type: .string, required: true, description: "Running application that owns the menu", maxLength: 255),
+      FunctionArg(name: "title", type: .string, required: false, description: "Menu item title; may be a path like \"View > Enter Full Screen\"", maxLength: 500),
+      FunctionArg(name: "path", type: .stringArray, required: false, description: "Menu title path, e.g. [\"View\", \"Enter Full Screen\"]", maxLength: 500, minItems: 1, maxItems: 32),
+      FunctionArg(name: "menu", type: .string, required: false, description: "Optional top-level menu title when title is a leaf item", maxLength: 255)
+    ]
+    return ClosureFunction(
+      name: "menu.click",
+      summary: "Click an application menu item by title or path using AXPress (no coordinates).",
+      tier: .write,
+      requiresAccessibility: true,
+      argSchema: schema,
+      planBuilder: { args in
+        var validated = try validateFunctionArgs(args, schema: schema)
+        let appName = try requiredMenuBarExtraArgument(validated["appName"]?.stringValue, name: "appName")
+        let path = try resolvedMenuClickPath(args: validated)
+        let target = try runningAppFunctionTarget(named: appName, resolver: applicationResolver)
+        validated["appName"] = .string(appName)
+        validated["path"] = .array(path.map(JSONValue.string))
+        return FunctionExecutionPlan(args: validated, target: target)
+      }
+    ) { plan in
+      let appName = plan.args["appName"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+      guard let path = plan.args["path"]?.stringArrayValue, !path.isEmpty else {
+        throw AgentProtocolError.functionFailed("menu.click did not receive a validated path", details: nil)
+      }
+      return try functionResult(from: appMenus.clickMenuItem(appName: appName, path: path))
+    }
+  }
+
+  private static func windowList(
+    applicationResolver: ApplicationResolving,
+    windows: WindowServicing
+  ) -> any MacOSFunction {
+    let schema = [
+      FunctionArg(
+        name: "appName",
+        type: .string,
+        required: false,
+        description: "Optional running application name to filter windows; defaults to the frontmost app",
+        maxLength: 255
+      )
+    ]
+    return ClosureFunction(
+      name: "window.list",
+      summary: "List on-screen windows (app, title, index, role, frame, main). Defaults to the frontmost app.",
+      tier: .read,
+      requiresAccessibility: true,
+      argSchema: schema,
+      planBuilder: { args in
+        var validated = try validateFunctionArgs(args, schema: schema)
+        let appName = validated["appName"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let target: FunctionTarget
+        if let appName {
+          target = try runningAppFunctionTarget(named: appName, resolver: applicationResolver)
+        } else {
+          target = try frontmostAppFunctionTarget()
+        }
+        validated["appName"] = .string(target.appName)
+        return FunctionExecutionPlan(args: validated, target: target)
+      }
+    ) { plan in
+      let appName = plan.args["appName"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+      return try functionResult(from: windows.listWindows(appName: appName))
+    }
+  }
+
+  private static func windowAction(
+    name: String,
+    applicationResolver: ApplicationResolving,
+    windows: WindowServicing,
+    operation: @escaping @Sendable (WindowServicing, String, String?) throws -> AXWindowActionPayload
+  ) -> any MacOSFunction {
+    let schema = [
+      FunctionArg(name: "appName", type: .string, required: true, description: "Running application that owns the window", maxLength: 255),
+      FunctionArg(name: "title", type: .string, required: false, description: "Window title substring (case-insensitive). Omit for the app's main window.", maxLength: 500)
+    ]
+    let summary: String
+    switch name {
+    case "window.close":
+      summary = "Close a window via its Accessibility close button."
+    case "window.minimize":
+      summary = "Minimize a window to the Dock via its Accessibility minimize button."
+    case "window.zoom":
+      summary = "Toggle zoom/maximize a window via its Accessibility zoom button."
+    default:
+      summary = "Bring a window to the front (AXRaise) and activate its application."
+    }
+    return ClosureFunction(
+      name: name,
+      summary: summary,
+      tier: .write,
+      requiresAccessibility: true,
+      argSchema: schema,
+      planBuilder: { args in
+        var validated = try validateFunctionArgs(args, schema: schema)
+        let appName = try requiredMenuBarExtraArgument(validated["appName"]?.stringValue, name: "appName")
+        let title = validated["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let target = try runningAppFunctionTarget(named: appName, resolver: applicationResolver)
+        validated["appName"] = .string(appName)
+        validated["title"] = title.map(JSONValue.string) ?? .null
+        return FunctionExecutionPlan(args: validated, target: target)
+      }
+    ) { plan in
+      guard let appName = plan.args["appName"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty else {
+        throw AgentProtocolError.functionFailed("Window action did not receive a validated appName", details: nil)
+      }
+      let title = plan.args["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+      return try functionResult(from: operation(windows, appName, title))
+    }
+  }
+
+  private static func menuBarStatusItemSchema(includeMenuPath: Bool = false, titleRequired: Bool = true) -> [FunctionArg] {
     var schema = [
       FunctionArg(
         name: "appName",
@@ -650,8 +824,10 @@ private enum CuratedFunctionFactory {
       FunctionArg(
         name: "title",
         type: .string,
-        required: true,
-        description: "Status item title, label, or identifier",
+        required: titleRequired,
+        description: titleRequired
+          ? "Status item title, label, or identifier"
+          : "Optional status item title, label, or identifier. Omit when the app has exactly one status item; on a mismatch the error lists the available items.",
         maxLength: 500
       )
     ]
@@ -1473,6 +1649,93 @@ private func runningMenuBarExtraFunctionTarget(
     throw AgentProtocolError.appNotFound("No running application matches '\(appName)'")
   case .ambiguous:
     throw AgentProtocolError.invalidRequest("Use an unambiguous running application name for '\(appName)'")
+  }
+}
+
+private func runningAppFunctionTarget(
+  named appName: String,
+  resolver: ApplicationResolving
+) throws -> FunctionTarget {
+  let resolution: ApplicationNameResolution
+  if let runningResolver = resolver as? any RunningApplicationNameResolving {
+    resolution = runningResolver.resolveRunningApplication(named: appName)
+  } else {
+    resolution = resolver.resolveApplication(named: appName)
+  }
+
+  switch resolution {
+  case .resolved(let resolved):
+    guard let running = resolver.runningApplication(bundleID: resolved.bundleID),
+          running.pid.map({ $0 > 0 }) == true else {
+      throw AgentProtocolError.appNotFound("Application '\(appName)' is not running")
+    }
+    return FunctionTarget(bundleID: running.bundleID, appName: running.appName, requiresAutomation: false)
+  case .notFound:
+    throw AgentProtocolError.appNotFound("No running application matches '\(appName)'")
+  case .ambiguous:
+    throw AgentProtocolError.invalidRequest("Use an unambiguous running application name for '\(appName)'")
+  }
+}
+
+/// Resolves the current frontmost GUI application as a function target. Used by
+/// read functions whose appName is optional so the permission gate still binds
+/// to one concrete application.
+private func frontmostAppFunctionTarget() throws -> FunctionTarget {
+  guard let app = NSWorkspace.shared.frontmostApplication,
+        !app.isTerminated,
+        app.activationPolicy == .regular,
+        let bundleID = app.bundleIdentifier else {
+    throw AgentProtocolError.appNotFound("No frontmost GUI application is available")
+  }
+  return FunctionTarget(bundleID: bundleID, appName: app.localizedName ?? bundleID, requiresAutomation: false)
+}
+
+/// Builds the menu title path for `menu.click`. An explicit `path` array wins;
+/// otherwise the path is derived from `menu`/`title`, splitting `title` on ">"
+/// when it encodes a path like "View > Enter Full Screen".
+private func resolvedMenuClickPath(args: [String: JSONValue]) throws -> [String] {
+  if let pathValue = args["path"] {
+    guard let rawPath = pathValue.stringArrayValue else {
+      throw invalidArgsError("Function argument validation failed", violations: [
+        .init(argument: "path", reason: "Expected an array of strings.")
+      ])
+    }
+    return try normalizedMenuClickPath(rawPath, argument: "path")
+  }
+
+  let title = args["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+  let menu = args["menu"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+
+  if let title, title.contains(">") {
+    return try normalizedMenuClickPath(title.components(separatedBy: ">"), argument: "title")
+  }
+  if let menu, let title {
+    return try normalizedMenuClickPath([menu, title], argument: "title")
+  }
+  if let title {
+    return try normalizedMenuClickPath([title], argument: "title")
+  }
+
+  throw invalidArgsError("Function argument validation failed", violations: [
+    .init(argument: "title", reason: "Provide title or path."),
+    .init(argument: "path", reason: "Provide title or path.")
+  ])
+}
+
+private func normalizedMenuClickPath(_ rawPath: [String], argument: String) throws -> [String] {
+  guard !rawPath.isEmpty else {
+    throw invalidArgsError("Function argument validation failed", violations: [
+      .init(argument: argument, reason: "Provide at least one menu title.")
+    ])
+  }
+  return try rawPath.enumerated().map { index, rawTitle in
+    let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !title.isEmpty else {
+      throw invalidArgsError("Function argument validation failed", violations: [
+        .init(argument: "\(argument)[\(index)]", reason: "Menu titles must not be empty.")
+      ])
+    }
+    return title
   }
 }
 

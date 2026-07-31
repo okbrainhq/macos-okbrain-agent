@@ -26,8 +26,36 @@ public protocol AccessibilityServicing: Sendable {
 /// protocol actions for menu-bar extras.
 public protocol MenuBarExtrasServicing: Sendable {
   func listMenuBarExtras(app: AXMenuBarExtraAppTarget?) throws -> AXMenuBarExtrasListPayload
-  func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String) throws -> AXMenuBarExtraOpenPayload
+  /// Opens a status item's popup menu. When `title` is nil the owner must have
+  /// exactly one status item; otherwise the call fails with an error that lists
+  /// the available items so the caller can pick one.
+  func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String?) throws -> AXMenuBarExtraOpenPayload
   func clickMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String, menuPath: [String]) throws -> AXMenuBarExtraClickPayload
+}
+
+/// Coordinate-free application-menu operations backing the curated `menu.*`
+/// functions. Implementations must use Accessibility APIs only, never raw
+/// screen coordinates.
+public protocol AppMenuServicing: Sendable {
+  /// Lists the top-level menu bar items of an app, or the frontmost GUI app
+  /// when `appName` is nil.
+  func listMenuItems(appName: String?) throws -> AXAppMenuListPayload
+  /// Opens the menu path and presses its final item (AXPress), e.g.
+  /// `["View", "Enter Full Screen"]`. A one-item path presses a top-level menu.
+  func clickMenuItem(appName: String?, path: [String]) throws -> AXMenuActionPayload
+}
+
+/// Coordinate-free window operations backing the curated `window.*` functions.
+/// Implementations must use Accessibility APIs only, never raw screen
+/// coordinates.
+public protocol WindowServicing: Sendable {
+  /// Lists on-screen windows. When `appName` is nil, lists windows across all
+  /// running GUI applications.
+  func listWindows(appName: String?) throws -> AXWindowCatalogPayload
+  func closeWindow(appName: String, title: String?) throws -> AXWindowActionPayload
+  func minimizeWindow(appName: String, title: String?) throws -> AXWindowActionPayload
+  func zoomWindow(appName: String, title: String?) throws -> AXWindowActionPayload
+  func raiseWindow(appName: String, title: String?) throws -> AXWindowActionPayload
 }
 
 /// AX status items do not consistently populate AXTitle. Keep the values that
@@ -120,7 +148,7 @@ func collectUnfilteredMenuBarExtraItems<App, Item>(
   return items
 }
 
-public final class SystemAccessibilityService: AccessibilityServicing, MenuBarExtrasServicing, @unchecked Sendable {
+public final class SystemAccessibilityService: AccessibilityServicing, MenuBarExtrasServicing, AppMenuServicing, WindowServicing, @unchecked Sendable {
   private static let maxValueLength = 2_000
   private static let maxTypeTextLength = 10_000
   private static let menuBarExtraListMessagingTimeout: Float = 0.75
@@ -462,9 +490,9 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     return AXMenuBarExtrasListPayload(items: items)
   }
 
-  public func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String) throws -> AXMenuBarExtraOpenPayload {
+  public func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String?) throws -> AXMenuBarExtraOpenPayload {
     try requireAccessibilityTrust()
-    let normalizedTitle = try requiredMenuBarExtraTitle(title, action: "menubar.open")
+    let normalizedTitle = normalizedOptionalMenuBarExtraTitle(title)
     return try withOpenedMenuBarExtra(app: app, title: normalizedTitle) { opened in
       AXMenuBarExtraOpenPayload(
         appName: opened.appName,
@@ -521,6 +549,206 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
 
       throw AgentProtocolError.internalError("Menu bar extra navigation did not reach a final item")
     }
+  }
+
+  // MARK: - Curated app menus
+
+  public func listMenuItems(appName: String?) throws -> AXAppMenuListPayload {
+    try requireAccessibilityTrust()
+    let target = try resolveMenuTarget(AXElementQuery(appName: appName))
+    let menuBar = try menuBar(for: target)
+    let items = immediateChildren(of: menuBar, role: kAXMenuBarItemRole).compactMap { item -> AXAppMenuItemPayload? in
+      guard let title = stringAttribute(item, kAXTitleAttribute)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+        return nil
+      }
+      let hasSubmenu = !immediateChildren(of: item, role: kAXMenuRole).isEmpty
+      return AXAppMenuItemPayload(
+        title: title,
+        enabled: boolAttribute(item, kAXEnabledAttribute) ?? true,
+        hasSubmenu: hasSubmenu,
+        path: [title]
+      )
+    }
+    return AXAppMenuListPayload(appName: target.name, items: items)
+  }
+
+  public func clickMenuItem(appName: String?, path: [String]) throws -> AXMenuActionPayload {
+    try requireAccessibilityTrust()
+    return try menuNavigate(query: AXElementQuery(appName: appName), path: path)
+  }
+
+  // MARK: - Curated windows
+
+  public func listWindows(appName: String?) throws -> AXWindowCatalogPayload {
+    try requireAccessibilityTrust()
+    let apps: [NSRunningApplication]
+    if let trimmedName = appName?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedName.isEmpty {
+      apps = [try resolveApp(AXElementQuery(appName: trimmedName))]
+    } else {
+      apps = runningGUIApps()
+        .sorted { ($0.localizedName ?? "").localizedCaseInsensitiveCompare($1.localizedName ?? "") == .orderedAscending }
+    }
+
+    var payloads: [AXWindowCatalogItemPayload] = []
+    for app in apps {
+      let appElement = AXUIElementCreateApplication(app.processIdentifier)
+      let mainWindow = axElement(from: copyAttribute(appElement, kAXMainWindowAttribute))
+      let name = windowAppName(app)
+      for (index, window) in windows(of: app.processIdentifier).enumerated() {
+        payloads.append(AXWindowCatalogItemPayload(
+          appName: name,
+          bundleID: app.bundleIdentifier,
+          pid: app.processIdentifier,
+          index: index,
+          title: stringAttribute(window, kAXTitleAttribute),
+          role: stringAttribute(window, kAXRoleAttribute),
+          subrole: stringAttribute(window, kAXSubroleAttribute),
+          frame: frame(of: window),
+          main: mainWindow.map { CFEqual($0, window) } ?? false
+        ))
+      }
+    }
+    return AXWindowCatalogPayload(windows: payloads)
+  }
+
+  public func closeWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
+    try pressWindowButton(appName: appName, title: title, subrole: kAXCloseButtonSubrole, actionName: "window.close")
+  }
+
+  public func minimizeWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
+    try pressWindowButton(appName: appName, title: title, subrole: kAXMinimizeButtonSubrole, actionName: "window.minimize")
+  }
+
+  public func zoomWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
+    try pressWindowButton(appName: appName, title: title, subrole: kAXZoomButtonSubrole, actionName: "window.zoom")
+  }
+
+  public func raiseWindow(appName: String, title: String?) throws -> AXWindowActionPayload {
+    try requireAccessibilityTrust()
+    let resolved = try resolveWindowTarget(appName: appName, title: title)
+    try checkAX(
+      AXUIElementPerformAction(resolved.window, kAXRaiseAction as CFString),
+      "Unable to raise window in \(windowAppName(resolved.app))"
+    )
+    // Raise only reorders within the app; activate the owner so the window
+    // actually reaches the foreground from a background agent.
+    let appElement = AXUIElementCreateApplication(resolved.app.processIdentifier)
+    if AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue) != .success {
+      resolved.app.activate()
+    }
+    return AXWindowActionPayload(
+      action: "window.raise",
+      appName: windowAppName(resolved.app),
+      bundleID: resolved.app.bundleIdentifier,
+      pid: resolved.app.processIdentifier,
+      index: resolved.index,
+      title: stringAttribute(resolved.window, kAXTitleAttribute)
+    )
+  }
+
+  private func pressWindowButton(
+    appName: String,
+    title: String?,
+    subrole: String,
+    actionName: String
+  ) throws -> AXWindowActionPayload {
+    try requireAccessibilityTrust()
+    let resolved = try resolveWindowTarget(appName: appName, title: title)
+    let button = try windowButton(resolved.window, subrole: subrole, appName: windowAppName(resolved.app))
+    try checkAX(
+      AXUIElementPerformAction(button, kAXPressAction as CFString),
+      "Unable to apply \(actionName) to a window in \(windowAppName(resolved.app))"
+    )
+    return AXWindowActionPayload(
+      action: actionName,
+      appName: windowAppName(resolved.app),
+      bundleID: resolved.app.bundleIdentifier,
+      pid: resolved.app.processIdentifier,
+      index: resolved.index,
+      title: stringAttribute(resolved.window, kAXTitleAttribute)
+    )
+  }
+
+  private struct ResolvedWindowTarget {
+    let app: NSRunningApplication
+    let window: AXUIElement
+    let index: Int
+  }
+
+  /// Resolves one window for a window action. With a non-nil title this is a
+  /// case-insensitive substring match; on ambiguity or miss the error lists the
+  /// available window titles. With no title the main window (else the first) is
+  /// used.
+  private func resolveWindowTarget(appName: String, title: String?) throws -> ResolvedWindowTarget {
+    let app = try resolveApp(AXElementQuery(appName: appName))
+    let appWindows = windows(of: app.processIdentifier)
+    let name = windowAppName(app)
+    guard !appWindows.isEmpty else {
+      throw AgentProtocolError.elementNotFound("App '\(name)' has no windows")
+    }
+
+    let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let trimmedTitle, !trimmedTitle.isEmpty {
+      let matches = appWindows.enumerated().filter { _, window in
+        stringAttribute(window, kAXTitleAttribute)?.localizedCaseInsensitiveContains(trimmedTitle) == true
+      }
+      if matches.count == 1, let (index, window) = matches.first {
+        return ResolvedWindowTarget(app: app, window: window, index: index)
+      }
+      if matches.count > 1 {
+        throw AgentProtocolError.invalidRequest(
+          "Multiple windows match '\(trimmedTitle)' in \(name). Windows: \(windowTitlesDescription(appWindows))"
+        )
+      }
+      throw AgentProtocolError.elementNotFound(
+        "No window matches '\(trimmedTitle)' in \(name). Windows: \(windowTitlesDescription(appWindows))"
+      )
+    }
+
+    let appElement = AXUIElementCreateApplication(app.processIdentifier)
+    if let main = axElement(from: copyAttribute(appElement, kAXMainWindowAttribute)),
+       let index = appWindows.firstIndex(where: { CFEqual($0, main) }) {
+      return ResolvedWindowTarget(app: app, window: main, index: index)
+    }
+    return ResolvedWindowTarget(app: app, window: appWindows[0], index: 0)
+  }
+
+  /// Finds a window's traffic-light button by subrole. The buttons are normally
+  /// immediate children of the window, but some apps nest them, so walk a shallow
+  /// subtree before giving up.
+  private func windowButton(_ window: AXUIElement, subrole: String, appName: String) throws -> AXUIElement {
+    var found: AXUIElement?
+
+    func walk(_ element: AXUIElement, depthRemaining: Int) {
+      if found != nil || depthRemaining <= 0 { return }
+      for child in children(of: element) {
+        if stringAttribute(child, kAXRoleAttribute)?.caseInsensitiveCompare(kAXButtonRole) == .orderedSame,
+           stringAttribute(child, kAXSubroleAttribute)?.caseInsensitiveCompare(subrole) == .orderedSame {
+          found = child
+          return
+        }
+        walk(child, depthRemaining: depthRemaining - 1)
+        if found != nil { return }
+      }
+    }
+
+    walk(window, depthRemaining: 5)
+    guard let button = found else {
+      throw AgentProtocolError.elementNotFound("Window in \(appName) has no \(subrole) button")
+    }
+    return button
+  }
+
+  private func windowTitlesDescription(_ windows: [AXUIElement]) -> String {
+    let descriptions = windows.enumerated().map { index, window -> String in
+      let title = stringAttribute(window, kAXTitleAttribute)?.trimmingCharacters(in: .whitespacesAndNewlines)
+      return "[\(index)] \(title?.isEmpty == false ? title! : "untitled")"
+    }
+    return descriptions.isEmpty ? "none" : descriptions.joined(separator: "; ")
+  }
+
+  private func windowAppName(_ app: NSRunningApplication) -> String {
+    app.localizedName ?? app.bundleIdentifier ?? "Unknown app"
   }
 
   public func value(query: AXElementQuery) throws -> AXValuePayload {
@@ -959,7 +1187,7 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
   /// than applying an action to a stale element.
   private func withOpenedMenuBarExtra<Result>(
     app target: AXMenuBarExtraAppTarget,
-    title: String,
+    title: String?,
     operation: (OpenedMenuBarExtra) throws -> Result
   ) throws -> Result {
     for attempt in 0..<2 {
@@ -967,7 +1195,8 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
         return try operation(try openMenuBarExtraMenuAttempt(app: target, title: title))
       } catch MenuBarExtraOperationError.invalidUIElement {
         guard attempt == 0 else {
-          throw AgentProtocolError.actionFailed("Menu bar status item '\(title)' became unavailable before it could be used")
+          let description = title.map { "'\($0)'" } ?? "the only status item"
+          throw AgentProtocolError.actionFailed("Menu bar status item \(description) became unavailable before it could be used")
         }
       }
     }
@@ -976,21 +1205,26 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
 
   private func openMenuBarExtraMenuAttempt(
     app target: AXMenuBarExtraAppTarget,
-    title: String
+    title: String?
   ) throws -> OpenedMenuBarExtra {
     let app = try resolveMenuBarExtraApp(target)
     let appName = menuBarExtraAppName(app)
     let extrasMenuBar = try extrasMenuBar(for: app)
-    let statusItem = try findMenuBarExtraStatusItem(in: extrasMenuBar, matching: title, appName: appName)
-    try ensureMenuBarExtraItemEnabled(statusItem, title: title, kind: "Status item", appName: appName)
+    let statusItem = try resolveMenuBarExtraStatusItem(in: extrasMenuBar, matching: title, appName: appName)
+    let matchLabel = title ?? menuBarExtraStatusItemCandidate(for: statusItem).visibleDescription
+    try ensureMenuBarExtraItemEnabled(statusItem, title: matchLabel, kind: "Status item", appName: appName)
     let menu = try showMenuAndWait(
       for: statusItem,
-      title: title,
+      title: matchLabel,
       kind: "status item",
       appName: appName,
-      path: [title]
+      path: [matchLabel]
     )
     return OpenedMenuBarExtra(app: app, appName: appName, statusItem: statusItem, menu: menu)
+  }
+
+  private func normalizedOptionalMenuBarExtraTitle(_ rawTitle: String?) -> String? {
+    MenuBarExtraStatusItemMatcher.normalizedText(rawTitle)
   }
 
   private func requiredMenuBarExtraTitle(_ rawTitle: String, action: String) throws -> String {
@@ -1014,13 +1248,30 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     }
   }
 
-  private func findMenuBarExtraStatusItem(
+  /// Resolves the status item to open. With a non-nil title this matches across
+  /// title/description/label/identifier (exact first, then contains). With a nil
+  /// title the owner must expose exactly one status item; otherwise the error
+  /// lists the visible candidates so the caller can choose one.
+  private func resolveMenuBarExtraStatusItem(
     in extrasMenuBar: AXUIElement,
-    matching rawTitle: String,
+    matching rawTitle: String?,
     appName: String
   ) throws -> AXUIElement {
     let items = immediateChildren(of: extrasMenuBar, role: kAXMenuBarItemRole)
     let candidates = items.map { menuBarExtraStatusItemCandidate(for: $0) }
+
+    guard let rawTitle else {
+      if items.count == 1, let only = items.first {
+        return only
+      }
+      if items.isEmpty {
+        throw AgentProtocolError.elementNotFound("App '\(appName)' has no menu bar status items to open")
+      }
+      throw AgentProtocolError.invalidRequest(
+        "App '\(appName)' has \(items.count) menu bar status items; provide a title that uniquely identifies one. Visible status items: \(MenuBarExtraStatusItemMatcher.visibleCandidatesDescription(candidates))"
+      )
+    }
+
     let matchingIndexes = MenuBarExtraStatusItemMatcher.matchingIndexes(query: rawTitle, candidates: candidates)
 
     if matchingIndexes.count == 1, let index = matchingIndexes.first {
