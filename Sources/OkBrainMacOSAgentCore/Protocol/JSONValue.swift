@@ -61,6 +61,13 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
     return value
   }
 
+  public var stringArrayValue: [String]? {
+    guard case .array(let values) = self else { return nil }
+    return values.compactMap(\.stringValue).count == values.count
+      ? values.compactMap(\.stringValue)
+      : nil
+  }
+
   public static func object(_ key: String, _ value: JSONValue?) -> JSONValue {
     object(from: [(key, value)])
   }

@@ -93,6 +93,7 @@ func runProtocolVerifier() throws {
   try runAccessibilityVerifier(configuration: configuration)
 
   try runGuardrailsAndFunctionsVerifier(configuration: configuration)
+  try verifyMenuBarExtraFunctions(configuration: configuration, screenshot: screenshot)
 
   try runConfigurationVerifier()
   try runFileEditingVerifier(permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .unknown)))
@@ -1185,6 +1186,7 @@ func verifyGlobalPermissionCategories(configuration: AgentConfiguration, screens
   let catalogState = FunctionRuntimeState()
   let mappings: [(String, [String: JSONValue], GlobalPermissionCategory)] = [
     ("app.list", [:], .applicationDiscovery),
+    ("menubar.list", [:], .menuBarExtras),
     ("system.get-volume", [:], .systemAudio),
     ("system.get-clipboard", [:], .clipboard),
     ("system.get-battery", [:], .power),
@@ -1227,6 +1229,8 @@ func verifyGlobalPermissionCategories(configuration: AgentConfiguration, screens
     "app.launch",
     "app.activate",
     "app.quit",
+    "menubar.open",
+    "menubar.click",
     "media.play-pause",
     "media.next",
     "media.previous",
@@ -1257,6 +1261,303 @@ func verifyGlobalPermissionCategories(configuration: AgentConfiguration, screens
       expectEqual(entry.permissionTarget, nil, "\(entry.name) must not advertise a misleading static target")
     }
   }
+}
+
+func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: CapturedImage) throws {
+  print("Verifier: menu bar extra functions")
+  let statusApp = ApplicationDescriptor(
+    bundleID: "com.example.StatusOwner",
+    appName: "Status Owner",
+    pid: 8123,
+    frontmost: false
+  )
+  let resolver = FakeApplicationResolver(
+    running: [statusApp],
+    names: ["Status Owner": .resolved(statusApp)]
+  )
+  let extras = RecordingMenuBarExtrasService()
+  let registry = FunctionRegistry.standard(applicationResolver: resolver, menuBarExtras: extras)
+  let appObserveRule = AXAppPermissionRule(
+    bundleID: statusApp.bundleID,
+    appName: statusApp.appName,
+    mode: .observe
+  )
+  let appControlRule = AXAppPermissionRule(
+    bundleID: statusApp.bundleID,
+    appName: statusApp.appName,
+    mode: .control
+  )
+
+  func makeHandler(
+    state: FunctionRuntimeState,
+    coordinator: AXPermissionCoordinator,
+    accessibility: PermissionState = .granted
+  ) -> AgentRequestHandler {
+    AgentRequestHandler(
+      configuration: configuration,
+      permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: accessibility)),
+      screenshots: FakeScreenshotService(capturedImage: screenshot),
+      functionRegistry: registry,
+      functionState: state,
+      automationPermissions: FakeAutomationPermissionService(status: .authorized),
+      axPermissionCoordinator: coordinator,
+      axTargetResolver: FakeAXTargetResolver()
+    )
+  }
+
+  let catalogHandler = makeHandler(state: FunctionRuntimeState(), coordinator: AXPermissionCoordinator())
+  let catalog: Envelope<FunctionListPayload> = try send(
+    AgentRequest(id: "menubar_catalog", action: "functions.list", params: AgentRequestParams()),
+    to: catalogHandler
+  )
+  guard let entries = catalog.data?.functions,
+        let listEntry = entries.first(where: { $0.name == "menubar.list" }),
+        let openEntry = entries.first(where: { $0.name == "menubar.open" }),
+        let clickEntry = entries.first(where: { $0.name == "menubar.click" }) else {
+    throw NSError(domain: "ProtocolVerifier", code: 20, userInfo: [NSLocalizedDescriptionKey: "Menu bar functions were not registered"])
+  }
+  expectEqual(listEntry.tier, .read, "menubar.list should be Tier 1")
+  expectEqual(listEntry.permissionTarget?.identifier, GlobalPermissionCategory.menuBarExtras.rawValue, "menubar.list global catalog target")
+  expectEqual(openEntry.tier, .write, "menubar.open should be Tier 2")
+  expectEqual(clickEntry.tier, .write, "menubar.click should be Tier 2")
+  expectEqual(openEntry.args.map(\.name), ["appName", "title"], "menubar.open argument schema")
+  expectEqual(clickEntry.args.map(\.name), ["appName", "title", "menuPath"], "menubar.click argument schema")
+  expectEqual(clickEntry.args.last?.type, .stringArray, "menubar.click menuPath argument type")
+  expectEqual(clickEntry.args.last?.minItems, 1, "menubar.click menuPath minimum")
+  expectEqual(clickEntry.args.last?.maxItems, 32, "menubar.click menuPath maximum")
+
+  let accessibilityDeniedHandler = makeHandler(
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(target: GlobalPermissionCategory.menuBarExtras.permissionTarget, mode: .control)
+    ]),
+    accessibility: .denied
+  )
+  let accessibilityDenied: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "menubar_list_accessibility_denied", action: "functions.run", params: AgentRequestParams(functionName: "menubar.list", args: [:])),
+    to: accessibilityDeniedHandler
+  )
+  expect(!accessibilityDenied.ok, "menubar.list must require Accessibility TCC before dispatch")
+  expectEqual(accessibilityDenied.error?.code, "permission_denied", "menubar.list Accessibility denial code")
+  expectEqual(extras.listTargets.count, 0, "Accessibility-denied list must not reach AX service")
+
+  let deniedGlobal = makeHandler(
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(prompter: FakePermissionPrompter(response: .notNow))
+  )
+  let unfilteredDenied: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "menubar_list_global_denied", action: "functions.run", params: AgentRequestParams(functionName: "menubar.list", args: [:])),
+    to: deniedGlobal
+  )
+  expect(!unfilteredDenied.ok, "unfiltered menubar.list should require global Observe")
+  expectEqual(unfilteredDenied.error?.code, "app_permission_required", "unfiltered list permission code")
+  expectEqual(extras.listTargets.count, 0, "denied unfiltered list must not reach AX service")
+
+  let globalListHandler = makeHandler(
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(target: GlobalPermissionCategory.menuBarExtras.permissionTarget, mode: .observe)
+    ])
+  )
+  let unfilteredList: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "menubar_list_global", action: "functions.run", params: AgentRequestParams(functionName: "menubar.list", args: [:])),
+    to: globalListHandler
+  )
+  expect(unfilteredList.ok, "global-allowed menubar.list should run")
+  expectEqual(extras.listTargets.count, 1, "unfiltered list should call AX service once")
+  expectEqual(extras.listTargets[0], nil, "unfiltered list should not bind one owner app")
+  guard let unfilteredValue = unfilteredList.data?.result.value,
+        case .object(let unfilteredObject) = unfilteredValue,
+        case .array(let unfilteredItems)? = unfilteredObject["items"],
+        case .object(let firstItem)? = unfilteredItems.first else {
+    throw NSError(domain: "ProtocolVerifier", code: 21, userInfo: [NSLocalizedDescriptionKey: "Unexpected menubar.list result"])
+  }
+  expectEqual(firstItem["appName"], .string(statusApp.appName), "menubar.list owner app result")
+  expectEqual(firstItem["identifier"], .string("com.example.status-owner.vpn"), "menubar.list identifier result")
+
+  let filteredDenied = makeHandler(
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(target: GlobalPermissionCategory.menuBarExtras.permissionTarget, mode: .control)
+    ], prompter: FakePermissionPrompter(response: .notNow))
+  )
+  let filteredWithoutAppGrant: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "menubar_list_filtered_denied",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.list", args: ["appName": .string("Status Owner")])
+    ),
+    to: filteredDenied
+  )
+  expect(!filteredWithoutAppGrant.ok, "filtered menubar.list must require the owner's Observe grant")
+  expectEqual(filteredWithoutAppGrant.error?.code, "app_permission_required", "filtered list permission code")
+  expectEqual(extras.listTargets.count, 1, "denied filtered list must not reach AX service")
+
+  let filteredListHandler = makeHandler(
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [appObserveRule])
+  )
+  let filteredList: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menubar_list_filtered",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.list", args: ["appName": .string("  Status Owner  ")])
+    ),
+    to: filteredListHandler
+  )
+  expect(filteredList.ok, "filtered menubar.list should accept an authorized owner app")
+  expectEqual(extras.listTargets.count, 2, "filtered list should call AX service")
+  expectEqual(extras.listTargets[1]?.pid, statusApp.pid, "filtered list must dispatch the re-resolved owner PID")
+  expectEqual(extras.listTargets[1]?.bundleID, statusApp.bundleID, "filtered list must dispatch the authorized bundle")
+
+  let disabledOpenHandler = makeHandler(
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [appControlRule])
+  )
+  let disabledOpen: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "menubar_open_disabled",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.open", args: ["appName": .string("Status Owner"), "title": .string("VPN")])
+    ),
+    to: disabledOpenHandler
+  )
+  expect(!disabledOpen.ok, "menubar.open should be disabled by default")
+  expectEqual(disabledOpen.error?.code, "function_disabled", "menubar.open default-enable code")
+
+  let observeOnlyOpenHandler = makeHandler(
+    state: FunctionRuntimeState(enabledFunctionNames: ["menubar.open"]),
+    coordinator: AXPermissionCoordinator(rules: [appObserveRule], prompter: FakePermissionPrompter(response: .notNow))
+  )
+  let observeOnlyOpen: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "menubar_open_observe_only",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.open", args: ["appName": .string("Status Owner"), "title": .string("VPN")])
+    ),
+    to: observeOnlyOpenHandler
+  )
+  expect(!observeOnlyOpen.ok, "Observe must not permit menubar.open")
+  expectEqual(observeOnlyOpen.error?.code, "app_permission_required", "menubar.open Control permission code")
+  expectEqual(extras.openedTitles.count, 0, "blocked menubar.open must not reach AX service")
+
+  let openHandler = makeHandler(
+    state: FunctionRuntimeState(enabledFunctionNames: ["menubar.open"]),
+    coordinator: AXPermissionCoordinator(rules: [appControlRule])
+  )
+  let missingOpenTitle: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "menubar_open_missing_title",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.open", args: ["appName": .string("Status Owner")])
+    ),
+    to: openHandler
+  )
+  expect(!missingOpenTitle.ok, "menubar.open without title should fail")
+  expectEqual(missingOpenTitle.error?.code, "invalid_args", "menubar.open missing title validation code")
+
+  let opened: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menubar_open",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.open", args: ["appName": .string(" Status Owner "), "title": .string(" VPN ")])
+    ),
+    to: openHandler
+  )
+  expect(opened.ok, "authorized menubar.open should run")
+  expectEqual(extras.openedTitles.last, "VPN", "menubar.open should normalize the status-item match")
+  expectEqual(extras.openedTargets.last?.pid, statusApp.pid, "menubar.open must use the re-resolved owner PID")
+  guard let openedValue = opened.data?.result.value,
+        case .object(let openedObject) = openedValue,
+        case .array(let menuItems)? = openedObject["menuItems"] else {
+    throw NSError(domain: "ProtocolVerifier", code: 22, userInfo: [NSLocalizedDescriptionKey: "Unexpected menubar.open result"])
+  }
+  expectEqual(menuItems.count, 2, "menubar.open should return top-level popup items")
+
+  for (title, expectedCode) in [("Disabled", "action_failed"), ("Missing", "element_not_found"), ("Ambiguous", "invalid_request")] {
+    let failure: Envelope<EmptyPayload> = try send(
+      AgentRequest(
+        id: "menubar_open_\(title.lowercased())",
+        action: "functions.run",
+        params: AgentRequestParams(functionName: "menubar.open", args: ["appName": .string("Status Owner"), "title": .string(title)])
+      ),
+      to: openHandler
+    )
+    expect(!failure.ok, "menubar.open \(title) mock failure should propagate")
+    expectEqual(failure.error?.code, expectedCode, "menubar.open \(title) error code")
+  }
+
+  let clickHandler = makeHandler(
+    state: FunctionRuntimeState(enabledFunctionNames: ["menubar.click"]),
+    coordinator: AXPermissionCoordinator(rules: [appControlRule])
+  )
+  let clicked: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menubar_click",
+      action: "functions.run",
+      params: AgentRequestParams(
+        functionName: "menubar.click",
+        args: [
+          "appName": .string("Status Owner"),
+          "title": .string("VPN"),
+          "menuPath": .array([.string(" Settings… "), .string(" General ")])
+        ]
+      )
+    ),
+    to: clickHandler
+  )
+  expect(clicked.ok, "authorized menubar.click should run")
+  expectEqual(extras.clickedTitles.last, "VPN", "menubar.click status-item title")
+  expectEqual(extras.clickedPaths.last, ["Settings…", "General"], "menubar.click should normalize menuPath")
+  guard let clickedValue = clicked.data?.result.value,
+        case .object(let clickedObject) = clickedValue,
+        case .array(let clickedPath)? = clickedObject["path"] else {
+    throw NSError(domain: "ProtocolVerifier", code: 23, userInfo: [NSLocalizedDescriptionKey: "Unexpected menubar.click result"])
+  }
+  expectEqual(clickedPath, [.string("Settings…"), .string("General")], "menubar.click result path")
+
+  let invalidClickRequests: [(String, [String: JSONValue])] = [
+    ("missing_title", ["appName": .string("Status Owner"), "menuPath": .array([.string("Settings…")])]),
+    ("empty_path", ["appName": .string("Status Owner"), "title": .string("VPN"), "menuPath": .array([])]),
+    ("empty_segment", ["appName": .string("Status Owner"), "title": .string("VPN"), "menuPath": .array([.string(" ")])]),
+    ("wrong_path_type", ["appName": .string("Status Owner"), "title": .string("VPN"), "menuPath": .string("Settings…")])
+  ]
+  for (suffix, args) in invalidClickRequests {
+    let invalid: Envelope<EmptyPayload> = try send(
+      AgentRequest(id: "menubar_click_\(suffix)", action: "functions.run", params: AgentRequestParams(functionName: "menubar.click", args: args)),
+      to: clickHandler
+    )
+    expect(!invalid.ok, "menubar.click \(suffix) should fail validation")
+    expectEqual(invalid.error?.code, "invalid_args", "menubar.click \(suffix) validation code")
+  }
+
+  let stopped = ApplicationDescriptor(bundleID: "com.example.StoppedStatus", appName: "Stopped Status")
+  let stoppedPrompter = CountingPermissionPrompter(response: .allowAlways)
+  let stoppedRegistry = FunctionRegistry.standard(
+    applicationResolver: FakeApplicationResolver(installed: [stopped], names: ["Stopped Status": .resolved(stopped)]),
+    menuBarExtras: extras
+  )
+  let stoppedHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .granted)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    functionRegistry: stoppedRegistry,
+    functionState: FunctionRuntimeState(),
+    automationPermissions: FakeAutomationPermissionService(status: .authorized),
+    axPermissionCoordinator: AXPermissionCoordinator(prompter: stoppedPrompter),
+    axTargetResolver: FakeAXTargetResolver()
+  )
+  let stoppedResult: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "menubar_list_stopped_app",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.list", args: ["appName": .string("Stopped Status")])
+    ),
+    to: stoppedHandler
+  )
+  expect(!stoppedResult.ok, "menubar.list must reject a non-running filtered app")
+  expectEqual(stoppedResult.error?.code, "app_not_found", "non-running menu bar owner error code")
+  expectEqual(stoppedPrompter.count, 0, "non-running menu bar owner must not prompt for access")
 }
 
 func verifyStoredTemplateReviewAndOutputBounds() throws {
@@ -2382,6 +2683,121 @@ struct FakeAutomationPermissionService: AutomationPermissionServicing {
 
   func status(forBundleID bundleID: String) -> AutomationPermissionStatus { status }
   func requestAccess(forBundleID bundleID: String) -> AutomationPermissionStatus { status }
+}
+
+final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedListTargets: [AXMenuBarExtraAppTarget?] = []
+  private var storedOpenedTargets: [AXMenuBarExtraAppTarget] = []
+  private var storedOpenedTitles: [String] = []
+  private var storedClickedTitles: [String] = []
+  private var storedClickedPaths: [[String]] = []
+
+  var listTargets: [AXMenuBarExtraAppTarget?] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedListTargets
+  }
+
+  var openedTargets: [AXMenuBarExtraAppTarget] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedOpenedTargets
+  }
+
+  var openedTitles: [String] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedOpenedTitles
+  }
+
+  var clickedTitles: [String] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedClickedTitles
+  }
+
+  var clickedPaths: [[String]] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedClickedPaths
+  }
+
+  func listMenuBarExtras(app: AXMenuBarExtraAppTarget?) throws -> AXMenuBarExtrasListPayload {
+    lock.lock()
+    storedListTargets.append(app)
+    lock.unlock()
+    return AXMenuBarExtrasListPayload(items: [statusItem(for: app ?? defaultTarget)])
+  }
+
+  func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String) throws -> AXMenuBarExtraOpenPayload {
+    switch title {
+    case "Disabled":
+      throw AgentProtocolError.actionFailed("Status item is disabled")
+    case "Missing":
+      throw AgentProtocolError.elementNotFound("Status item is missing")
+    case "Ambiguous":
+      throw AgentProtocolError.invalidRequest("Multiple status items match")
+    default:
+      break
+    }
+    lock.lock()
+    storedOpenedTargets.append(app)
+    storedOpenedTitles.append(title)
+    lock.unlock()
+    return AXMenuBarExtraOpenPayload(
+      appName: app.appName,
+      statusItem: statusItem(for: app),
+      menuItems: [
+        AXElementNode(
+          role: "AXMenuItem", subrole: nil, title: "Settings…", label: nil, identifier: "settings",
+          value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil
+        ),
+        AXElementNode(
+          role: "AXMenuItem", subrole: nil, title: "Quit", label: nil, identifier: "quit",
+          value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil
+        )
+      ]
+    )
+  }
+
+  func clickMenuBarExtra(
+    app: AXMenuBarExtraAppTarget,
+    title: String,
+    menuPath: [String]
+  ) throws -> AXMenuBarExtraClickPayload {
+    lock.lock()
+    storedClickedTitles.append(title)
+    storedClickedPaths.append(menuPath)
+    lock.unlock()
+    return AXMenuBarExtraClickPayload(
+      appName: app.appName,
+      statusItem: statusItem(for: app),
+      path: menuPath,
+      item: AXElementNode(
+        role: "AXMenuItem", subrole: nil, title: menuPath.last, label: nil, identifier: nil,
+        value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil
+      )
+    )
+  }
+
+  private var defaultTarget: AXMenuBarExtraAppTarget {
+    AXMenuBarExtraAppTarget(pid: 8123, appName: "Status Owner", bundleID: "com.example.StatusOwner")
+  }
+
+  private func statusItem(for app: AXMenuBarExtraAppTarget) -> AXMenuBarExtraPayload {
+    AXMenuBarExtraPayload(
+      appName: app.appName,
+      bundleID: app.bundleID,
+      pid: app.pid,
+      title: "VPN",
+      label: "Acme VPN",
+      identifier: "com.example.status-owner.vpn",
+      description: "Acme VPN status menu",
+      enabled: true,
+      frame: CaptureRect(x: 1200, y: 0, width: 24, height: 24)
+    )
+  }
 }
 
 struct FakeApplicationResolver: ApplicationResolving {

@@ -28,6 +28,11 @@ let package = Package(
       name: "DisplayWakeTests",
       dependencies: ["OkBrainMacOSAgentCore"],
       path: "Tests/DisplayWakeTests"
+    ),
+    .testTarget(
+      name: "OkBrainMacOSAgentCoreTests",
+      dependencies: ["OkBrainMacOSAgentCore"],
+      path: "Tests/OkBrainMacOSAgentCoreTests"
     )
   ]
 )

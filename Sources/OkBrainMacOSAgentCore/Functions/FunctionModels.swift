@@ -25,6 +25,7 @@ public enum FunctionExecutionIdentity: Equatable, Sendable {
 
 public enum FunctionArgumentType: String, Codable, Equatable, Sendable {
   case string
+  case stringArray
   case integer
   case number
   case boolean
@@ -39,6 +40,10 @@ public struct FunctionArg: Codable, Equatable, Sendable, Identifiable {
   public let minimum: Double?
   public let maximum: Double?
   public let maxLength: Int?
+  /// Item-count bounds for array arguments. `maxLength` continues to bound
+  /// each string element for `.stringArray`.
+  public let minItems: Int?
+  public let maxItems: Int?
 
   public var id: String { name }
 
@@ -50,7 +55,9 @@ public struct FunctionArg: Codable, Equatable, Sendable, Identifiable {
     enumValues: [String]? = nil,
     minimum: Double? = nil,
     maximum: Double? = nil,
-    maxLength: Int? = nil
+    maxLength: Int? = nil,
+    minItems: Int? = nil,
+    maxItems: Int? = nil
   ) {
     self.name = name
     self.type = type
@@ -60,6 +67,8 @@ public struct FunctionArg: Codable, Equatable, Sendable, Identifiable {
     self.minimum = minimum
     self.maximum = maximum
     self.maxLength = maxLength
+    self.minItems = minItems
+    self.maxItems = maxItems
   }
 }
 
@@ -687,6 +696,9 @@ public protocol MacOSFunction: Sendable {
   var name: String { get }
   var summary: String { get }
   var tier: FunctionTier { get }
+  /// Whether the backend requires the process-level macOS Accessibility grant
+  /// in addition to its App & Global Access permission target.
+  var requiresAccessibility: Bool { get }
   var executionIdentity: FunctionExecutionIdentity { get }
   var argSchema: [FunctionArg] { get }
   /// A static app target may be used for catalog display; dynamic targets
@@ -702,6 +714,8 @@ public protocol MacOSFunction: Sendable {
 }
 
 public extension MacOSFunction {
+  var requiresAccessibility: Bool { false }
+
   var executionIdentity: FunctionExecutionIdentity {
     .builtIn(name: name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
   }
@@ -743,6 +757,22 @@ public func validateFunctionArgs(
       if let values = arg.enumValues,
          !values.contains(where: { $0.caseInsensitiveCompare(text) == .orderedSame }) {
         violations.append(.init(argument: arg.name, reason: "Must be one of: \(values.joined(separator: ", "))."))
+      }
+    case (.stringArray, .array(let values)):
+      if let minItems = arg.minItems, values.count < minItems {
+        violations.append(.init(argument: arg.name, reason: "Must contain at least \(minItems) item\(minItems == 1 ? "" : "s")."))
+      }
+      if let maxItems = arg.maxItems, values.count > maxItems {
+        violations.append(.init(argument: arg.name, reason: "Must contain at most \(maxItems) items."))
+      }
+      for (index, value) in values.enumerated() {
+        guard case .string(let text) = value else {
+          violations.append(.init(argument: "\(arg.name)[\(index)]", reason: "Expected string."))
+          continue
+        }
+        if let maxLength = arg.maxLength, text.count > maxLength {
+          violations.append(.init(argument: "\(arg.name)[\(index)]", reason: "Must be at most \(maxLength) characters."))
+        }
       }
     case (.integer, .number(let number)):
       if number.rounded() != number {

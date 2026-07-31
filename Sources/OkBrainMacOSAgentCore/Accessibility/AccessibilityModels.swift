@@ -282,3 +282,89 @@ public struct AXMenuActionPayload: Codable, Equatable, Sendable {
     self.item = item
   }
 }
+
+/// A concrete, already-resolved owner of menu-bar status items. Curated
+/// functions bind access to its bundle ID before passing this PID to AX.
+public struct AXMenuBarExtraAppTarget: Equatable, Sendable {
+  public let pid: Int32
+  public let appName: String
+  public let bundleID: String
+
+  public init(pid: Int32, appName: String, bundleID: String) {
+    self.pid = pid
+    self.appName = appName
+    self.bundleID = bundleID
+  }
+}
+
+/// One status item from an application's `AXExtrasMenuBar`.
+public struct AXMenuBarExtraPayload: Codable, Equatable, Sendable {
+  public let appName: String
+  public let bundleID: String?
+  public let pid: Int32
+  public let title: String?
+  public let label: String?
+  public let identifier: String?
+  public let description: String?
+  public let enabled: Bool
+  public let frame: CaptureRect?
+
+  public init(
+    appName: String,
+    bundleID: String?,
+    pid: Int32,
+    title: String?,
+    label: String?,
+    identifier: String?,
+    description: String?,
+    enabled: Bool,
+    frame: CaptureRect?
+  ) {
+    self.appName = appName
+    self.bundleID = bundleID
+    self.pid = pid
+    self.title = title
+    self.label = label
+    self.identifier = identifier
+    self.description = description
+    self.enabled = enabled
+    self.frame = frame
+  }
+}
+
+/// Status items found across one or more running applications.
+public struct AXMenuBarExtrasListPayload: Codable, Equatable, Sendable {
+  public let items: [AXMenuBarExtraPayload]
+
+  public init(items: [AXMenuBarExtraPayload]) {
+    self.items = items
+  }
+}
+
+/// A status item's popup menu after it has been opened.
+public struct AXMenuBarExtraOpenPayload: Codable, Equatable, Sendable {
+  public let appName: String
+  public let statusItem: AXMenuBarExtraPayload
+  public let menuItems: [AXElementNode]
+
+  public init(appName: String, statusItem: AXMenuBarExtraPayload, menuItems: [AXElementNode]) {
+    self.appName = appName
+    self.statusItem = statusItem
+    self.menuItems = menuItems
+  }
+}
+
+/// Result of pressing a menu item in a status item's popup hierarchy.
+public struct AXMenuBarExtraClickPayload: Codable, Equatable, Sendable {
+  public let appName: String
+  public let statusItem: AXMenuBarExtraPayload
+  public let path: [String]
+  public let item: AXElementNode
+
+  public init(appName: String, statusItem: AXMenuBarExtraPayload, path: [String], item: AXElementNode) {
+    self.appName = appName
+    self.statusItem = statusItem
+    self.path = path
+    self.item = item
+  }
+}
