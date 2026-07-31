@@ -72,8 +72,16 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
       window = matchingWindow
     } else if let appName = params.appName?.trimmingCharacters(in: .whitespacesAndNewlines), !appName.isEmpty {
       window = try largestWindow(matchingAppName: appName, in: content.windows)
+    } else if let pid = params.pid, pid > 0 {
+      // A pid may target a menu-bar-only app (e.g. OkDisk) with no on-screen
+      // window; fall back to a full-screen capture so the caller still gets a
+      // useful image instead of an error.
+      guard let pidWindow = largestWindow(matchingPid: pid, in: content.windows) else {
+        return try captureFullScreen(includeCursor: includeCursor)
+      }
+      window = pidWindow
     } else {
-      throw AgentProtocolError.invalidRequest("Window capture requires appName or windowId")
+      throw AgentProtocolError.invalidRequest("Window capture requires appName, windowId, or pid")
     }
 
     let filter = SCContentFilter(desktopIndependentWindow: window)
@@ -130,6 +138,30 @@ public final class ScreenCaptureKitScreenshotService: ScreenshotCapturing, @unch
     }
 
     return candidate.window
+  }
+
+  /// Largest on-screen, standard-layer window owned by the given process, or
+  /// `nil` when the app has no such window (e.g. a menu-bar-only app). Mirrors
+  /// `largestWindow(matchingAppName:)` but resolves by exact process id and
+  /// returns an optional so the caller can fall back to a full-screen capture.
+  private func largestWindow(matchingPid pid: Int32, in windows: [SCWindow]) -> SCWindow? {
+    let candidates: [(window: SCWindow, area: CGFloat)] = windows.compactMap { window in
+      guard
+        window.isOnScreen,
+        window.windowLayer == 0,
+        window.owningApplication?.processID == pid
+      else {
+        return nil
+      }
+
+      guard window.frame.width > 1, window.frame.height > 1 else {
+        return nil
+      }
+
+      return (window: window, area: window.frame.width * window.frame.height)
+    }
+
+    return candidates.max(by: { $0.area < $1.area })?.window
   }
 
   private func streamConfiguration(width: Int, height: Int, includeCursor: Bool) -> SCStreamConfiguration {
