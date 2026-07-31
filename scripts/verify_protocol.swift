@@ -119,6 +119,9 @@ func runAccessibilityVerifier(configuration: AgentConfiguration) throws {
   )
   expect(status.ok, "ax status should be ok")
   expect(status.data?.capabilities.contains("ax.find") == true, "ax capabilities should be listed when accessibility is granted")
+  for action in ["ax.menu-click", "ax.menu-navigate", "ax.menu-list"] {
+    expect(status.data?.capabilities.contains(action) == true, "\(action) capability should be listed when accessibility is granted")
+  }
 
   let apps: Envelope<AXAppListPayload> = try send(
     AgentRequest(id: "req_ax_apps", action: "ax.list-apps", params: AgentRequestParams()),
@@ -156,6 +159,146 @@ func runAccessibilityVerifier(configuration: AgentConfiguration) throws {
   )
   expect(perform.ok, "ax.perform should be ok")
   expectEqual(perform.data?.action, "press", "ax.perform action")
+
+  let menuClick: Envelope<AXMenuActionPayload> = try send(
+    AgentRequest(id: "req_ax_menu_click", action: "ax.menu-click", params: AgentRequestParams(appName: "TextEdit", title: "File")),
+    to: handler
+  )
+  expect(menuClick.ok, "ax.menu-click should be ok")
+  expectEqual(menuClick.data?.action, "ax.menu-click", "ax.menu-click action")
+  expectEqual(menuClick.data?.path, ["File"], "ax.menu-click path")
+
+  let menuNavigate: Envelope<AXMenuActionPayload> = try send(
+    AgentRequest(
+      id: "req_ax_menu_navigate",
+      action: "ax.menu-navigate",
+      params: AgentRequestParams(appName: "TextEdit", menuPath: ["File", "New"])
+    ),
+    to: handler
+  )
+  expect(menuNavigate.ok, "ax.menu-navigate should be ok")
+  expectEqual(menuNavigate.data?.path, ["File", "New"], "ax.menu-navigate path")
+  expectEqual(menuNavigate.data?.item.title, "New", "ax.menu-navigate final item")
+
+  let menuList: Envelope<AXMenuListPayload> = try send(
+    AgentRequest(id: "req_ax_menu_list", action: "ax.menu-list", params: AgentRequestParams(appName: "TextEdit")),
+    to: handler
+  )
+  expect(menuList.ok, "ax.menu-list should be ok")
+  expectEqual(menuList.data?.appName, "TextEdit", "ax.menu-list app name")
+  expectEqual(menuList.data?.items.map(\.title), ["TextEdit", "File", "Edit"], "ax.menu-list item titles")
+
+  let missingMenuTitle: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_ax_menu_click_missing", action: "ax.menu-click", params: AgentRequestParams(appName: "TextEdit", title: " ")),
+    to: handler
+  )
+  expect(!missingMenuTitle.ok, "ax.menu-click without a title should fail")
+  expectEqual(missingMenuTitle.error?.code, "invalid_request", "missing menu title error code")
+
+  let missingMenuPath: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_ax_menu_navigate_missing", action: "ax.menu-navigate", params: AgentRequestParams(appName: "TextEdit", menuPath: [])),
+    to: handler
+  )
+  expect(!missingMenuPath.ok, "ax.menu-navigate without a path should fail")
+  expectEqual(missingMenuPath.error?.code, "invalid_request", "missing menu path error code")
+
+  let emptyMenuPathSegment: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_ax_menu_navigate_empty_segment", action: "ax.menu-navigate", params: AgentRequestParams(appName: "TextEdit", menuPath: ["File", " "])),
+    to: handler
+  )
+  expect(!emptyMenuPathSegment.ok, "ax.menu-navigate with an empty path segment should fail")
+  expectEqual(emptyMenuPathSegment.error?.code, "invalid_request", "empty menu path segment error code")
+
+  let filePathRoundTrip = AgentRequest(
+    id: "req_file_path_round_trip",
+    action: "fs.read",
+    params: AgentRequestParams(path: "/tmp/project/README.md")
+  )
+  let decodedFilePathRoundTrip = try JSONDecoder().decode(AgentRequest.self, from: JSONEncoder().encode(filePathRoundTrip))
+  expectEqual(decodedFilePathRoundTrip.params?.path, "/tmp/project/README.md", "string file path must round-trip")
+  expectEqual(decodedFilePathRoundTrip.params?.menuPath, nil, "string file path must not decode as a menu path")
+
+  let menuPathRoundTrip = AgentRequest(
+    id: "req_menu_path_round_trip",
+    action: "ax.menu-navigate",
+    params: AgentRequestParams(menuPath: ["File", "New"])
+  )
+  let encodedMenuPathRoundTrip = try JSONEncoder().encode(menuPathRoundTrip)
+  let menuPathRequestObject = try JSONSerialization.jsonObject(with: encodedMenuPathRoundTrip) as? [String: Any]
+  let menuPathParamsObject = menuPathRequestObject?["params"] as? [String: Any]
+  expectEqual(menuPathParamsObject?["path"] as? [String], ["File", "New"], "menu path must encode on the path wire key")
+  let decodedMenuPathRoundTrip = try JSONDecoder().decode(AgentRequest.self, from: encodedMenuPathRoundTrip)
+  expectEqual(decodedMenuPathRoundTrip.params?.menuPath, ["File", "New"], "array menu path must round-trip")
+  expectEqual(decodedMenuPathRoundTrip.params?.path, nil, "array menu path must not decode as a file path")
+
+  let rawMenuNavigate: Envelope<AXMenuActionPayload> = try sendRaw(
+    Data(#"{"protocol":"okbrain.macos-agent.v3","id":"req_ax_menu_navigate_raw","action":"ax.menu-navigate","params":{"appName":"TextEdit","path":["File","New"]}}"#.utf8),
+    to: handler
+  )
+  expect(rawMenuNavigate.ok, "raw JSON array path should dispatch ax.menu-navigate")
+  expectEqual(rawMenuNavigate.data?.path, ["File", "New"], "raw JSON menu path")
+
+  let malformedMenuPath: Envelope<EmptyPayload> = try sendRaw(
+    Data(#"{"protocol":"okbrain.macos-agent.v3","id":"req_ax_menu_navigate_malformed","action":"ax.menu-navigate","params":{"appName":"TextEdit","path":42}}"#.utf8),
+    to: handler
+  )
+  expect(!malformedMenuPath.ok, "non-string/non-array path should fail decoding")
+  expectEqual(malformedMenuPath.error?.code, "invalid_request", "malformed menu path error code")
+
+  let observeOnlyHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: axPermissions,
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    accessibility: FakeAccessibilityService(),
+    axPermissionCoordinator: AXPermissionCoordinator(
+      rules: [AXAppPermissionRule(bundleID: "com.apple.TextEdit", appName: "TextEdit", mode: .observe)],
+      prompter: FakePermissionPrompter(response: .notNow)
+    ),
+    axTargetResolver: FakeAXTargetResolver()
+  )
+  let observedMenuList: Envelope<AXMenuListPayload> = try send(
+    AgentRequest(id: "req_ax_menu_list_observe", action: "ax.menu-list", params: AgentRequestParams(appName: "TextEdit")),
+    to: observeOnlyHandler
+  )
+  expect(observedMenuList.ok, "Observe permission should allow ax.menu-list")
+  let blockedMenuClick: Envelope<EmptyPayload> = try send(
+    AgentRequest(id: "req_ax_menu_click_observe", action: "ax.menu-click", params: AgentRequestParams(appName: "TextEdit", title: "File")),
+    to: observeOnlyHandler
+  )
+  expect(!blockedMenuClick.ok, "Observe permission must not allow ax.menu-click")
+  expectEqual(blockedMenuClick.error?.code, "app_permission_required", "menu click requires Control")
+
+  let frontmostMenuTarget = AXResolvedTarget(
+    target: AXPermissionTarget(bundleID: "com.example.MenuTarget", appName: "Menu Target", pid: 987),
+    pid: 987,
+    wasResolved: true
+  )
+  let frontmostMenuResolver = RecordingAXTargetResolver(resolution: frontmostMenuTarget, isCurrent: true)
+  let frontmostMenuAccessibility = RecordingAccessibilityService(apps: [])
+  let frontmostMenuHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: axPermissions,
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    accessibility: frontmostMenuAccessibility,
+    axPermissionCoordinator: AXPermissionCoordinator(
+      rules: [AXAppPermissionRule(bundleID: "com.example.MenuTarget", appName: "Menu Target", mode: .control)]
+    ),
+    axTargetResolver: frontmostMenuResolver
+  )
+  let _: Envelope<AXMenuListPayload> = try send(
+    AgentRequest(id: "req_ax_menu_list_frontmost", action: "ax.menu-list", params: AgentRequestParams()),
+    to: frontmostMenuHandler
+  )
+  let _: Envelope<AXMenuActionPayload> = try send(
+    AgentRequest(id: "req_ax_menu_click_frontmost", action: "ax.menu-click", params: AgentRequestParams(title: "File")),
+    to: frontmostMenuHandler
+  )
+  let _: Envelope<AXMenuActionPayload> = try send(
+    AgentRequest(id: "req_ax_menu_navigate_frontmost", action: "ax.menu-navigate", params: AgentRequestParams(menuPath: ["File", "New"])),
+    to: frontmostMenuHandler
+  )
+  expectEqual(frontmostMenuResolver.frontmostFallbackRequests, [true, true, true], "all high-level menu actions must use frontmost fallback")
+  expectEqual(frontmostMenuAccessibility.menuQueryPIDs, [987, 987, 987], "menu dispatch must use the authorized captured PID")
 
   let getValue: Envelope<AXValuePayload> = try send(
     AgentRequest(id: "req_ax_get_value", action: "ax.get-value", params: AgentRequestParams(appName: "TextEdit", identifier: "nameField")),
@@ -227,6 +370,9 @@ func runAccessibilityVerifier(configuration: AgentConfiguration) throws {
   )
   expect(deniedStatus.ok, "denied status should be ok")
   expect(deniedStatus.data?.capabilities.contains("ax.find") == false, "ax capabilities must be hidden when accessibility is denied")
+  for action in ["ax.menu-click", "ax.menu-navigate", "ax.menu-list"] {
+    expect(deniedStatus.data?.capabilities.contains(action) == false, "\(action) capability must be hidden when accessibility is denied")
+  }
 }
 
 func runGuardrailsAndFunctionsVerifier(configuration: AgentConfiguration) throws {
@@ -1291,6 +1437,7 @@ final class RecordingAccessibilityService: AccessibilityServicing, @unchecked Se
   private let lock = NSLock()
   private let listedApps: [AXAppPayload]
   private var recordedTypedPIDs: [Int32?] = []
+  private var recordedMenuQueryPIDs: [Int32?] = []
 
   init(apps: [AXAppPayload]) {
     listedApps = apps
@@ -1302,11 +1449,45 @@ final class RecordingAccessibilityService: AccessibilityServicing, @unchecked Se
     return recordedTypedPIDs
   }
 
+  var menuQueryPIDs: [Int32?] {
+    lock.lock()
+    defer { lock.unlock() }
+    return recordedMenuQueryPIDs
+  }
+
+  private func recordMenuQuery(_ query: AXElementQuery) {
+    lock.lock()
+    recordedMenuQueryPIDs.append(query.pid)
+    lock.unlock()
+  }
+
   func listApps() throws -> AXAppListPayload { AXAppListPayload(apps: listedApps) }
   func listWindows(query: AXElementQuery) throws -> AXWindowListPayload { AXWindowListPayload(pid: query.pid ?? 0, app: query.appName ?? "Test", windows: []) }
   func tree(query: AXElementQuery) throws -> AXTreePayload { throw AgentProtocolError.elementNotFound("Unused test tree") }
   func find(query: AXElementQuery, limit: Int) throws -> AXFindPayload { AXFindPayload(matches: [], truncated: false) }
   func perform(query: AXElementQuery, action: String) throws -> AXPerformPayload { throw AgentProtocolError.elementNotFound("Unused test perform") }
+  func menuClick(query: AXElementQuery, title: String) throws -> AXMenuActionPayload {
+    recordMenuQuery(query)
+    return AXMenuActionPayload(
+      action: "ax.menu-click",
+      appName: query.appName ?? "Test",
+      path: [title],
+      item: AXElementNode(role: "AXMenuBarItem", subrole: nil, title: title, label: nil, identifier: nil, value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil)
+    )
+  }
+  func menuNavigate(query: AXElementQuery, path: [String]) throws -> AXMenuActionPayload {
+    recordMenuQuery(query)
+    return AXMenuActionPayload(
+      action: "ax.menu-navigate",
+      appName: query.appName ?? "Test",
+      path: path,
+      item: AXElementNode(role: "AXMenuItem", subrole: nil, title: path.last, label: nil, identifier: nil, value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil)
+    )
+  }
+  func menuListItems(query: AXElementQuery) throws -> AXMenuListPayload {
+    recordMenuQuery(query)
+    return AXMenuListPayload(appName: query.appName ?? "Test", items: [AXMenuItemPayload(title: "File", enabled: true)])
+  }
   func value(query: AXElementQuery) throws -> AXValuePayload { throw AgentProtocolError.elementNotFound("Unused test value") }
   func setValue(query: AXElementQuery, value: String) throws -> AXValuePayload { throw AgentProtocolError.elementNotFound("Unused test value") }
   func typeText(_ text: String, targetPid: Int32?) throws {
@@ -1942,6 +2123,18 @@ func sendFrame<T: Decodable>(
   as type: T.Type
 ) throws -> (envelope: Envelope<T>, bodyData: Data) {
   let requestData = try JSONEncoder().encode(request)
+  return try sendRawFrame(requestData, to: handler, as: type)
+}
+
+func sendRaw<T: Decodable>(_ requestData: Data, to handler: AgentRequestHandler) throws -> Envelope<T> {
+  try sendRawFrame(requestData, to: handler, as: T.self).envelope
+}
+
+func sendRawFrame<T: Decodable>(
+  _ requestData: Data,
+  to handler: AgentRequestHandler,
+  as type: T.Type
+) throws -> (envelope: Envelope<T>, bodyData: Data) {
   let responseData = handler.handle(requestData: requestData)
   let frame = try AgentBinaryFrame.decode(responseData)
   let envelope = try JSONDecoder().decode(Envelope<T>.self, from: frame.headerData)
@@ -2108,6 +2301,41 @@ struct FakeAccessibilityService: AccessibilityServicing {
   func perform(query: AXElementQuery, action: String) throws -> AXPerformPayload {
     if let performResult { return performResult }
     return AXPerformPayload(action: action, element: findResult.matches[0])
+  }
+
+  func menuClick(query: AXElementQuery, title: String) throws -> AXMenuActionPayload {
+    AXMenuActionPayload(
+      action: "ax.menu-click",
+      appName: query.appName ?? "TextEdit",
+      path: [title],
+      item: AXElementNode(
+        role: "AXMenuBarItem", subrole: nil, title: title, label: nil, identifier: nil,
+        value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil
+      )
+    )
+  }
+
+  func menuNavigate(query: AXElementQuery, path: [String]) throws -> AXMenuActionPayload {
+    AXMenuActionPayload(
+      action: "ax.menu-navigate",
+      appName: query.appName ?? "TextEdit",
+      path: path,
+      item: AXElementNode(
+        role: "AXMenuItem", subrole: nil, title: path.last, label: nil, identifier: nil,
+        value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil
+      )
+    )
+  }
+
+  func menuListItems(query: AXElementQuery) throws -> AXMenuListPayload {
+    AXMenuListPayload(
+      appName: query.appName ?? "TextEdit",
+      items: [
+        AXMenuItemPayload(title: "TextEdit", enabled: true),
+        AXMenuItemPayload(title: "File", enabled: true),
+        AXMenuItemPayload(title: "Edit", enabled: true)
+      ]
+    )
   }
 
   func value(query: AXElementQuery) throws -> AXValuePayload {

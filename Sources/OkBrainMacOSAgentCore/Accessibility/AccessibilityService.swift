@@ -9,6 +9,9 @@ public protocol AccessibilityServicing: Sendable {
   func tree(query: AXElementQuery) throws -> AXTreePayload
   func find(query: AXElementQuery, limit: Int) throws -> AXFindPayload
   func perform(query: AXElementQuery, action: String) throws -> AXPerformPayload
+  func menuClick(query: AXElementQuery, title: String) throws -> AXMenuActionPayload
+  func menuNavigate(query: AXElementQuery, path: [String]) throws -> AXMenuActionPayload
+  func menuListItems(query: AXElementQuery) throws -> AXMenuListPayload
   func value(query: AXElementQuery) throws -> AXValuePayload
   func setValue(query: AXElementQuery, value: String) throws -> AXValuePayload
   func typeText(_ text: String, targetPid: Int32?) throws
@@ -208,6 +211,123 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
     }
     try checkAX(AXUIElementPerformAction(element, axAction as CFString), "Perform '\(normalizedAction)' failed")
     return AXPerformPayload(action: normalizedAction, element: snapshot(element))
+  }
+
+  // MARK: - High-level menu bar navigation
+
+  /// Clicks a top-level menu bar item. When no app name is supplied, this
+  /// convenience entry point targets the current frontmost GUI application.
+  public func menuClick(appName: String?, title: String) throws -> AXMenuActionPayload {
+    try menuClick(query: AXElementQuery(appName: appName), title: title)
+  }
+
+  /// Opens each parent menu in `path` and presses the final item. A one-item
+  /// path presses the matching top-level menu bar item.
+  public func menuNavigate(appName: String?, path: [String]) throws -> AXMenuActionPayload {
+    try menuNavigate(query: AXElementQuery(appName: appName), path: path)
+  }
+
+  /// Lists visible top-level menu bar items. When no app name is supplied,
+  /// this convenience entry point targets the current frontmost GUI application.
+  public func menuListItems(appName: String?) throws -> AXMenuListPayload {
+    try menuListItems(query: AXElementQuery(appName: appName))
+  }
+
+  public func menuClick(query: AXElementQuery, title: String) throws -> AXMenuActionPayload {
+    let normalizedTitle = try requiredMenuTitle(title, action: "ax.menu-click")
+    let target = try resolveMenuTarget(query)
+    let menuBar = try menuBar(for: target)
+    let item = try findMenuBarItem(in: menuBar, titled: normalizedTitle, appName: target.name)
+    try ensureMenuItemEnabled(item, title: normalizedTitle, kind: "Menu bar item", appName: target.name)
+    try checkAX(
+      AXUIElementPerformAction(item, kAXPressAction as CFString),
+      "Unable to click menu bar item '\(normalizedTitle)' in \(target.name)"
+    )
+    return AXMenuActionPayload(
+      action: "ax.menu-click",
+      appName: target.name,
+      path: [normalizedTitle],
+      item: snapshot(item)
+    )
+  }
+
+  public func menuNavigate(query: AXElementQuery, path: [String]) throws -> AXMenuActionPayload {
+    let normalizedPath = try normalizedMenuPath(path)
+    let target = try resolveMenuTarget(query)
+    let menuBar = try menuBar(for: target)
+    let topLevelTitle = normalizedPath[0]
+    let topLevelItem = try findMenuBarItem(in: menuBar, titled: topLevelTitle, appName: target.name)
+    try ensureMenuItemEnabled(topLevelItem, title: topLevelTitle, kind: "Menu bar item", appName: target.name)
+
+    // A single path component is a useful shorthand for the same behavior as
+    // ax.menu-click and has no submenu target to resolve.
+    guard normalizedPath.count > 1 else {
+      try checkAX(
+        AXUIElementPerformAction(topLevelItem, kAXPressAction as CFString),
+        "Unable to click menu bar item '\(topLevelTitle)' in \(target.name)"
+      )
+      return AXMenuActionPayload(
+        action: "ax.menu-navigate",
+        appName: target.name,
+        path: normalizedPath,
+        item: snapshot(topLevelItem)
+      )
+    }
+
+    try checkAX(
+      AXUIElementPerformAction(topLevelItem, kAXShowMenuAction as CFString),
+      "Unable to open menu '\(topLevelTitle)' in \(target.name)"
+    )
+    Thread.sleep(forTimeInterval: 0.15)
+    var currentMenu = try openedMenu(for: topLevelItem, appName: target.name, path: [topLevelTitle])
+
+    for index in 1..<normalizedPath.count {
+      let title = normalizedPath[index]
+      let parentPath = Array(normalizedPath[0..<index])
+      let item = try findMenuItem(
+        in: currentMenu,
+        titled: title,
+        appName: target.name,
+        parentPath: parentPath
+      )
+      try ensureMenuItemEnabled(item, title: title, kind: "Menu item", appName: target.name)
+
+      if index == normalizedPath.count - 1 {
+        try checkAX(
+          AXUIElementPerformAction(item, kAXPressAction as CFString),
+          "Unable to click menu item '\(title)' in \(target.name)"
+        )
+        return AXMenuActionPayload(
+          action: "ax.menu-navigate",
+          appName: target.name,
+          path: normalizedPath,
+          item: snapshot(item)
+        )
+      }
+
+      try checkAX(
+        AXUIElementPerformAction(item, kAXShowMenuAction as CFString),
+        "Unable to open submenu '\(title)' in \(target.name)"
+      )
+      Thread.sleep(forTimeInterval: 0.15)
+      currentMenu = try openedMenu(for: item, appName: target.name, path: Array(normalizedPath[0...index]))
+    }
+
+    // The loop always returns on its final iteration; preserve a fail-closed
+    // error in case that invariant changes in a future refactor.
+    throw AgentProtocolError.internalError("Menu navigation did not reach a final item")
+  }
+
+  public func menuListItems(query: AXElementQuery) throws -> AXMenuListPayload {
+    let target = try resolveMenuTarget(query)
+    let menuBar = try menuBar(for: target)
+    let items = immediateChildren(of: menuBar, role: kAXMenuBarItemRole).compactMap { item -> AXMenuItemPayload? in
+      guard let title = stringAttribute(item, kAXTitleAttribute)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+        return nil
+      }
+      return AXMenuItemPayload(title: title, enabled: boolAttribute(item, kAXEnabledAttribute) ?? true)
+    }
+    return AXMenuListPayload(appName: target.name, items: items)
   }
 
   public func value(query: AXElementQuery) throws -> AXValuePayload {
@@ -445,6 +565,165 @@ public final class SystemAccessibilityService: AccessibilityServicing, @unchecke
   private func enableWebAccessibility(on appElement: AXUIElement) {
     _ = AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
     _ = AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+  }
+
+  private struct ResolvedMenuTarget {
+    let app: NSRunningApplication
+    let element: AXUIElement
+
+    var name: String {
+      app.localizedName ?? app.bundleIdentifier ?? "Unknown app"
+    }
+  }
+
+  /// Resolves a GUI application element for the menu convenience APIs. With no
+  /// explicit name, this intentionally targets the current frontmost app.
+  private func resolveApp(named name: String?) throws -> AXUIElement {
+    let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let trimmedName, !trimmedName.isEmpty {
+      let app = try resolveApp(AXElementQuery(appName: trimmedName))
+      return AXUIElementCreateApplication(app.processIdentifier)
+    }
+
+    guard let app = NSWorkspace.shared.frontmostApplication,
+          !app.isTerminated,
+          app.activationPolicy == .regular else {
+      throw AgentProtocolError.appNotFound("No frontmost GUI app is available")
+    }
+    return AXUIElementCreateApplication(app.processIdentifier)
+  }
+
+  private func resolveMenuTarget(_ query: AXElementQuery) throws -> ResolvedMenuTarget {
+    let hasExplicitName = query.appName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    let app: NSRunningApplication
+    if query.pid != nil || hasExplicitName {
+      app = try resolveApp(query)
+    } else {
+      guard let frontmost = NSWorkspace.shared.frontmostApplication,
+            !frontmost.isTerminated,
+            frontmost.activationPolicy == .regular else {
+        throw AgentProtocolError.appNotFound("No frontmost GUI app is available")
+      }
+      app = frontmost
+    }
+    return ResolvedMenuTarget(app: app, element: AXUIElementCreateApplication(app.processIdentifier))
+  }
+
+  private func menuBar(for target: ResolvedMenuTarget) throws -> AXUIElement {
+    guard let menuBar = axElement(from: copyAttribute(target.element, kAXMenuBarAttribute)) else {
+      throw AgentProtocolError.elementNotFound("App '\(target.name)' has no menu bar")
+    }
+    return menuBar
+  }
+
+  private func requiredMenuTitle(_ rawTitle: String, action: String) throws -> String {
+    let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !title.isEmpty else {
+      throw AgentProtocolError.invalidRequest("title is required for \(action)")
+    }
+    return title
+  }
+
+  private func normalizedMenuPath(_ path: [String]) throws -> [String] {
+    guard !path.isEmpty else {
+      throw AgentProtocolError.invalidRequest("path must be a non-empty array of menu titles for ax.menu-navigate")
+    }
+    return try path.enumerated().map { index, rawTitle in
+      let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !title.isEmpty else {
+        throw AgentProtocolError.invalidRequest("path[\(index)] must be a non-empty menu title for ax.menu-navigate")
+      }
+      return title
+    }
+  }
+
+  private func immediateChildren(of element: AXUIElement, role: String) -> [AXUIElement] {
+    let matches = children(of: element).filter {
+      stringAttribute($0, kAXRoleAttribute)?.caseInsensitiveCompare(role) == .orderedSame
+    }
+    if !matches.isEmpty {
+      return matches
+    }
+
+    // Some apps report an empty AXChildren array while a just-opened menu is
+    // present only through AXVisibleChildren. Re-query that immediate set after
+    // each show-menu action without walking into unrelated descendants.
+    return (copyAttribute(element, kAXVisibleChildrenAttribute) as? [AXUIElement] ?? []).filter {
+      stringAttribute($0, kAXRoleAttribute)?.caseInsensitiveCompare(role) == .orderedSame
+    }
+  }
+
+  private func findMenuBarItem(
+    in menuBar: AXUIElement,
+    titled title: String,
+    appName: String? = nil
+  ) throws -> AXUIElement {
+    try findImmediateMenuChild(
+      in: menuBar,
+      role: kAXMenuBarItemRole,
+      titled: title,
+      kind: "Menu bar item",
+      appName: appName,
+      parentPath: []
+    )
+  }
+
+  private func findMenuItem(
+    in menu: AXUIElement,
+    titled title: String,
+    appName: String? = nil,
+    parentPath: [String] = []
+  ) throws -> AXUIElement {
+    try findImmediateMenuChild(
+      in: menu,
+      role: kAXMenuItemRole,
+      titled: title,
+      kind: "Menu item",
+      appName: appName,
+      parentPath: parentPath
+    )
+  }
+
+  /// Uses an exact case-insensitive title match first, then an immediate-child
+  /// contains match for labels that include a dynamic suffix such as an ellipsis.
+  private func findImmediateMenuChild(
+    in container: AXUIElement,
+    role: String,
+    titled title: String,
+    kind: String,
+    appName: String?,
+    parentPath: [String]
+  ) throws -> AXUIElement {
+    let candidates = immediateChildren(of: container, role: role)
+    if let exact = candidates.first(where: {
+      stringAttribute($0, kAXTitleAttribute)?.caseInsensitiveCompare(title) == .orderedSame
+    }) {
+      return exact
+    }
+    if let contains = candidates.first(where: {
+      stringAttribute($0, kAXTitleAttribute)?.localizedCaseInsensitiveContains(title) == true
+    }) {
+      return contains
+    }
+
+    let parentDescription = parentPath.isEmpty ? "" : " under \(parentPath.joined(separator: " > "))"
+    let appDescription = appName.map { " in \($0)" } ?? ""
+    throw AgentProtocolError.elementNotFound("\(kind) '\(title)' not found\(parentDescription)\(appDescription)")
+  }
+
+  private func openedMenu(for item: AXUIElement, appName: String, path: [String]) throws -> AXUIElement {
+    guard let menu = immediateChildren(of: item, role: kAXMenuRole).first else {
+      throw AgentProtocolError.elementNotFound(
+        "Menu '\(path.joined(separator: " > "))' did not appear in \(appName)"
+      )
+    }
+    return menu
+  }
+
+  private func ensureMenuItemEnabled(_ item: AXUIElement, title: String, kind: String, appName: String) throws {
+    guard boolAttribute(item, kAXEnabledAttribute) != false else {
+      throw AgentProtocolError.actionFailed("\(kind) '\(title)' is disabled in \(appName)")
+    }
   }
 
   private func runningGUIApps() -> [NSRunningApplication] {

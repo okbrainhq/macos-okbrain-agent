@@ -245,3 +245,40 @@ public struct AXSimpleResultPayload: Codable, Equatable, Sendable {
     self.detail = detail
   }
 }
+
+/// One top-level item in an application's menu bar.
+public struct AXMenuItemPayload: Codable, Equatable, Sendable {
+  public let title: String
+  public let enabled: Bool
+
+  public init(title: String, enabled: Bool) {
+    self.title = title
+    self.enabled = enabled
+  }
+}
+
+/// The visible top-level menu bar items for one application.
+public struct AXMenuListPayload: Codable, Equatable, Sendable {
+  public let appName: String
+  public let items: [AXMenuItemPayload]
+
+  public init(appName: String, items: [AXMenuItemPayload]) {
+    self.appName = appName
+    self.items = items
+  }
+}
+
+/// Result of a high-level menu click or hierarchical navigation action.
+public struct AXMenuActionPayload: Codable, Equatable, Sendable {
+  public let action: String
+  public let appName: String
+  public let path: [String]
+  public let item: AXElementNode
+
+  public init(action: String, appName: String, path: [String], item: AXElementNode) {
+    self.action = action
+    self.appName = appName
+    self.path = path
+    self.item = item
+  }
+}

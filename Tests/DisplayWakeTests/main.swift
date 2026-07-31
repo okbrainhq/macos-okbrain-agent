@@ -105,6 +105,25 @@ struct FakeAccessibilityService: AccessibilityServicing {
       value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil
     ))
   }
+  func menuClick(query: AXElementQuery, title: String) throws -> AXMenuActionPayload {
+    AXMenuActionPayload(
+      action: "ax.menu-click",
+      appName: query.appName ?? "Test",
+      path: [title],
+      item: AXElementNode(role: "AXMenuBarItem", subrole: nil, title: title, label: nil, identifier: nil, value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil)
+    )
+  }
+  func menuNavigate(query: AXElementQuery, path: [String]) throws -> AXMenuActionPayload {
+    AXMenuActionPayload(
+      action: "ax.menu-navigate",
+      appName: query.appName ?? "Test",
+      path: path,
+      item: AXElementNode(role: "AXMenuItem", subrole: nil, title: path.last, label: nil, identifier: nil, value: nil, valueTruncated: nil, frame: nil, enabled: true, focused: false, children: nil)
+    )
+  }
+  func menuListItems(query: AXElementQuery) throws -> AXMenuListPayload {
+    AXMenuListPayload(appName: query.appName ?? "Test", items: [AXMenuItemPayload(title: "File", enabled: true)])
+  }
   func value(query: AXElementQuery) throws -> AXValuePayload {
     AXValuePayload(element: AXElementNode(
       role: "AXTextField", subrole: nil, title: nil, label: nil, identifier: nil,
