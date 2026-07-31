@@ -240,3 +240,18 @@ Returns version/build details for diagnostics. Expected transport is:
 - Screenshot test captures through the `.sock` protocol, receives WebP bytes directly, uploads/stores them, and returns `fileUri`.
 - Chat tool result stores `fileUri`, `mimeType`, and `description`; it must not persist raw image bytes.
 - Mock socket daemon must emit/parse `OKB1` binary frames.
+
+## Listener resilience (ops note)
+
+The agent's UNIX socket listener is hardened so a single bad or hung request cannot take down the
+whole endpoint:
+
+- Each accepted connection is handled on a concurrent queue; the accept loop never runs request
+  handling code, so a hung handler (e.g. a `functions.run` waiting on a permission prompt) cannot
+  wedge `accept()` and cause `ECONNREFUSED` for other clients.
+- Transient `accept` errors are skipped; fatal errors trigger a supervised rebind with backoff.
+- Per-connection reads time out, and failures are logged to the unified log under subsystem
+  `com.okbrain.macos-agent`, category `socket-server`.
+
+If `agent.status` is refused even though `/tmp/okbrain-macos-agent.sock` exists, restart the agent
+and see the "Socket listener diagnostics" section in `README.md`.
