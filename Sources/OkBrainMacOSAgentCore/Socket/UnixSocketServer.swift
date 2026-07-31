@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os.log
 
 public enum SocketServerStatus: String, Equatable, Sendable {
   case stopped
@@ -27,6 +28,22 @@ public struct SocketServerSnapshot: Equatable, Sendable {
   }
 }
 
+/// A UNIX-domain socket server that speaks the OKB1 binary frame protocol.
+///
+/// Resilience contract (the listener must never silently die):
+/// - The accept loop runs on its own serial queue and ONLY accepts connections.
+///   Each accepted client is handed off to a concurrent queue, so a slow, hung,
+///   or malicious request handler can never block `accept()` again. (Previously
+///   `handleClient` ran inline on the accept loop; a single hung request wedged
+///   the loop, the listen backlog filled, and the kernel returned ECONNREFUSED
+///   to every subsequent client — the whole agent appeared dead.)
+/// - Transient `accept` errors are logged and skipped; fatal ones bubble up to a
+///   supervisor that logs loudly and restarts the loop (rebinding the socket)
+///   with backoff instead of tearing the server down permanently.
+/// - Per-connection reads have a timeout so a silent/half-open client cannot hold
+///   a handler thread forever.
+/// - All notable failures are emitted to the unified log (subsystem
+///   `com.okbrain.macos-agent`, category `socket-server`) and via `onStateChange`.
 public final class UnixSocketServer {
   public typealias RequestHandler = (Data) -> Data
   public var onStateChange: ((SocketServerSnapshot) -> Void)?
@@ -34,11 +51,32 @@ public final class UnixSocketServer {
   private let socketPath: String
   private let maxRequestBytes: Int
   private let requestHandler: RequestHandler
-  private let queue = DispatchQueue(label: "com.okbrain.macos-agent.socket-server", qos: .userInitiated)
+
+  /// Serial queue that runs the accept loop. It must never execute request
+  /// handling code.
+  private let acceptQueue = DispatchQueue(
+    label: "com.okbrain.macos-agent.socket-server.accept",
+    qos: .userInitiated
+  )
+  /// Concurrent queue for per-connection handling. Isolating handling here is
+  /// what keeps the listener alive when an individual request hangs.
+  private let clientQueue = DispatchQueue(
+    label: "com.okbrain.macos-agent.socket-server.client",
+    qos: .userInitiated,
+    attributes: .concurrent
+  )
+
   private let lock = NSLock()
   private var serverFD: Int32 = -1
   private var stopRequested = false
   private var started = false
+
+  /// Bound on how long a silent client may hold a handler thread in `read()`.
+  private let readTimeoutSeconds: Int = 60
+  /// Give up restarting only after sustained fatal failures, and never silently.
+  private let maxRestartAttempts = 50
+
+  private static let logger = Logger(subsystem: "com.okbrain.macos-agent", category: "socket-server")
 
   public init(
     socketPath: String,
@@ -65,8 +103,8 @@ public final class UnixSocketServer {
     lock.unlock()
 
     emit(SocketServerSnapshot(status: .starting, socketPath: socketPath))
-    queue.async { [weak self] in
-      self?.run()
+    acceptQueue.async { [weak self] in
+      self?.supervise()
     }
   }
 
@@ -83,52 +121,116 @@ public final class UnixSocketServer {
     }
   }
 
-  private func run() {
-    do {
-      let fd = try bindAndListen()
-      lock.lock()
-      serverFD = fd
-      lock.unlock()
+  // MARK: - Supervision
 
-      emit(SocketServerSnapshot(status: .running, socketPath: socketPath, startedAt: Date()))
-
-      while !isStopRequested {
-        let clientFD = Darwin.accept(fd, nil, nil)
-        if clientFD < 0 {
-          if errno == EINTR {
-            continue
-          }
-          if isStopRequested {
-            break
-          }
-          throw AgentProtocolError.socketError("accept failed: \(String(cString: strerror(errno)))")
-        }
-
-        handleClient(clientFD)
+  /// Keeps the accept loop alive. `runAcceptLoop` returns `nil` on a clean stop
+  /// or an error message on a fatal failure; on a fatal failure we log loudly and
+  /// restart (rebinding the socket) with a short backoff. The listener therefore
+  /// never disappears without a trace.
+  private func supervise() {
+    var attempts = 0
+    while !isStopRequested {
+      let failure = runAcceptLoop()
+      if isStopRequested {
+        break
       }
-    } catch let error as AgentProtocolError {
-      if !isStopRequested {
-        emit(SocketServerSnapshot(status: .failed, socketPath: socketPath, errorMessage: error.message))
+
+      attempts += 1
+      let message = failure ?? "accept loop exited unexpectedly"
+      Self.logger.error(
+        "Socket accept loop exited: \(message, privacy: .public) — restarting (attempt \(attempts))"
+      )
+      emit(SocketServerSnapshot(status: .failed, socketPath: socketPath, errorMessage: message))
+
+      if attempts >= maxRestartAttempts {
+        Self.logger.error(
+          "Socket accept loop giving up after \(attempts) failed restarts; listener is DOWN on \(self.socketPath, privacy: .public)"
+        )
+        break
       }
-    } catch {
+
+      let delay = min(5.0, 0.25 * Double(attempts))
+      Thread.sleep(forTimeInterval: delay)
       if !isStopRequested {
-        emit(SocketServerSnapshot(status: .failed, socketPath: socketPath, errorMessage: error.localizedDescription))
+        emit(SocketServerSnapshot(status: .starting, socketPath: socketPath))
       }
     }
-
-    lock.lock()
-    let fd = serverFD
-    serverFD = -1
-    started = false
-    lock.unlock()
-
-    if fd >= 0 {
-      Darwin.close(fd)
-    }
-    unlinkIfSocketExists(socketPath)
 
     if isStopRequested {
       emit(SocketServerSnapshot(status: .stopped, socketPath: socketPath))
+    }
+  }
+
+  /// Binds, listens, and accepts until stopped or a fatal error occurs. Returns
+  /// `nil` for a clean stop, or a human-readable error for a fatal failure that
+  /// the supervisor should restart.
+  private func runAcceptLoop() -> String? {
+    let fd: Int32
+    do {
+      fd = try bindAndListen()
+    } catch {
+      return "bind/listen failed: \(describe(error))"
+    }
+
+    lock.lock()
+    serverFD = fd
+    lock.unlock()
+
+    emit(SocketServerSnapshot(status: .running, socketPath: socketPath, startedAt: Date()))
+    Self.logger.info("Socket server listening on \(self.socketPath, privacy: .public)")
+
+    defer {
+      lock.lock()
+      let current = serverFD
+      if current == fd {
+        serverFD = -1
+      }
+      lock.unlock()
+
+      if current >= 0 {
+        Darwin.close(current)
+      }
+      unlinkIfSocketExists(socketPath)
+    }
+
+    while !isStopRequested {
+      let clientFD = Darwin.accept(fd, nil, nil)
+      if clientFD < 0 {
+        if errno == EINTR {
+          continue
+        }
+        if isStopRequested {
+          break
+        }
+        if isTransientAcceptError(errno) {
+          // Resource pressure or an aborted/raced connection: log and keep serving.
+          Self.logger.error(
+            "accept failed transiently: \(String(cString: strerror(errno)), privacy: .public); continuing"
+          )
+          Thread.sleep(forTimeInterval: 0.05)
+          continue
+        }
+        // Fatal: the listening socket is unusable. Let the supervisor rebind.
+        return "accept failed fatally: \(String(cString: strerror(errno)))"
+      }
+
+      // Hand off and immediately accept again. Never handle a client inline.
+      clientQueue.async { [weak self] in
+        self?.handleClient(clientFD)
+      }
+    }
+
+    return nil
+  }
+
+  private func isTransientAcceptError(_ errorCode: Int32) -> Bool {
+    switch errorCode {
+    case ECONNABORTED, EWOULDBLOCK, EAGAIN, EMFILE, ENFILE, ENOBUFS, ENOMEM,
+         EPROTO, EPERM, EFAULT, ECONNRESET, ETIMEDOUT, ENETDOWN, ENETUNREACH,
+         ENETRESET, EHOSTDOWN, EHOSTUNREACH:
+      return true
+    default:
+      return false
     }
   }
 
@@ -137,6 +239,8 @@ public final class UnixSocketServer {
     defer { lock.unlock() }
     return stopRequested
   }
+
+  // MARK: - Bind / listen
 
   private func bindAndListen() throws -> Int32 {
     guard socketPath.utf8CString.count <= MemoryLayout.size(ofValue: sockaddr_un().sun_path) else {
@@ -178,7 +282,7 @@ public final class UnixSocketServer {
 
     chmod(socketPath, mode_t(S_IRUSR | S_IWUSR))
 
-    guard Darwin.listen(fd, 16) == 0 else {
+    guard Darwin.listen(fd, 128) == 0 else {
       let message = String(cString: strerror(errno))
       Darwin.close(fd)
       throw AgentProtocolError.socketError("listen failed: \(message)")
@@ -187,6 +291,8 @@ public final class UnixSocketServer {
     return fd
   }
 
+  // MARK: - Per-connection handling
+
   private func handleClient(_ clientFD: Int32) {
     defer {
       Darwin.close(clientFD)
@@ -194,6 +300,16 @@ public final class UnixSocketServer {
 
     var noSigPipe: Int32 = 1
     setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+
+    // A silent or half-open client must not be able to hold this worker forever.
+    var receiveTimeout = timeval(tv_sec: readTimeoutSeconds, tv_usec: 0)
+    setsockopt(
+      clientFD,
+      SOL_SOCKET,
+      SO_RCVTIMEO,
+      &receiveTimeout,
+      socklen_t(MemoryLayout<timeval>.size)
+    )
 
     do {
       let requestData = try readRequest(from: clientFD)
@@ -204,6 +320,7 @@ public final class UnixSocketServer {
       let responseData = requestHandler(requestData)
       try write(responseData, to: clientFD)
     } catch {
+      Self.logger.debug("Connection handling ended: \(self.describe(error), privacy: .public)")
       return
     }
   }
@@ -250,6 +367,9 @@ public final class UnixSocketServer {
         if errno == EINTR {
           continue
         }
+        if errno == EWOULDBLOCK || errno == EAGAIN {
+          throw AgentProtocolError.socketError("read failed: timed out after \(readTimeoutSeconds)s")
+        }
         throw AgentProtocolError.socketError("read failed: \(String(cString: strerror(errno)))")
       }
 
@@ -278,6 +398,8 @@ public final class UnixSocketServer {
       }
     }
   }
+
+  // MARK: - Filesystem helpers
 
   private func createParentDirectoryIfNeeded() throws {
     let parentURL = URL(fileURLWithPath: socketPath).deletingLastPathComponent()
@@ -308,6 +430,15 @@ public final class UnixSocketServer {
     if lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFSOCK {
       unlink(path)
     }
+  }
+
+  // MARK: - Helpers
+
+  private func describe(_ error: Error) -> String {
+    if let agentError = error as? AgentProtocolError {
+      return agentError.message
+    }
+    return error.localizedDescription
   }
 
   private func emit(_ snapshot: SocketServerSnapshot) {

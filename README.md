@@ -106,3 +106,34 @@ These are requested automatically on first launch. If you rebuild without code s
 | Build prints `unsigned` after setup | Run `setup-codesign.sh` again and check that it prints an `Identity:` hash |
 | Permission dialogs keep appearing | Ensure the app is signed (`build.sh` prints `Signed ...`) |
 | Socket not found | Check that the matching agent is running (`pgrep OkBrainMacOSAgent-Dev` for dev, `pgrep OkBrainMacOSAgent` for prod) |
+| Socket file exists but every call fails with `Connection refused` (errno 61) | A request handler hung and wedged the accept loop (historical bug). The listener now handles each client off the accept loop and auto-restarts; restart the agent and check the `socket-server` log category. See [Socket listener diagnostics](#socket-listener-diagnostics). |
+
+### Socket listener diagnostics
+
+The socket server (`Sources/OkBrainMacOSAgentCore/Socket/UnixSocketServer.swift`) is built so the
+listener can never silently die:
+
+- The accept loop runs on its own serial queue and **only** accepts connections. Each accepted
+  client is dispatched to a concurrent queue, so a slow, hung, or malicious request handler can no
+  longer block `accept()`. (Previously `handleClient` ran inline on the accept loop; one hung
+  request filled the listen backlog and the kernel returned `ECONNREFUSED` to every client, making
+  the whole agent appear dead while the process and socket file still existed.)
+- Transient `accept` errors are logged and skipped; fatal errors bubble up to a supervisor that logs
+  loudly and rebinds with backoff.
+- Per-connection reads have a timeout, so a silent/half-open client cannot hold a handler forever.
+- Notable failures are logged to the unified log (subsystem `com.okbrain.macos-agent`, category
+  `socket-server`).
+
+If the agent ever appears unresponsive again, diagnose with:
+
+```bash
+PID=$(pgrep -x OkBrainMacOSAgent)            # or OkBrainMacOSAgent-Dev for dev
+lsof -p "$PID" | grep okbrain                 # is the listening fd present?
+sample "$PID" 1 -file /tmp/agent.txt          # is the accept loop blocked in accept(), or a handler hung?
+log show --last 5m --predicate 'subsystem == "com.okbrain.macos-agent"' --info | grep socket-server
+```
+
+A healthy idle agent shows its `com.okbrain.macos-agent.socket-server.accept` thread blocked in
+`accept()`. If a single `functions.run`/`ax.*` handler is hung (for example waiting on a permission
+prompt), only that one client is affected; `agent.status` and other calls still succeed. Approve the
+pending permission in the agent UI (or via the persisted `axPermissionState` rules) to unblock it.
