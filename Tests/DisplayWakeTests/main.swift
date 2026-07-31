@@ -138,6 +138,7 @@ struct FakeAccessibilityService: AccessibilityServicing {
   func clickAt(x: Double, y: Double, button: String, clickCount: Int, targetPid: Int32?) throws {}
   func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?, targetPid: Int32?) throws {}
   func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws {}
+  func ensureFrontmost(pid: Int32?) {}
 }
 
 struct FakeReadFunction: MacOSFunction {

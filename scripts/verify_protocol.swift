@@ -2331,6 +2331,7 @@ final class RecordingAccessibilityService: AccessibilityServicing, @unchecked Se
   private let listedApps: [AXAppPayload]
   private var recordedTypedPIDs: [Int32?] = []
   private var recordedMenuQueryPIDs: [Int32?] = []
+  private var recordedFrontmostPIDs: [Int32?] = []
 
   init(apps: [AXAppPayload]) {
     listedApps = apps
@@ -2346,6 +2347,12 @@ final class RecordingAccessibilityService: AccessibilityServicing, @unchecked Se
     lock.lock()
     defer { lock.unlock() }
     return recordedMenuQueryPIDs
+  }
+
+  var frontmostPIDs: [Int32?] {
+    lock.lock()
+    defer { lock.unlock() }
+    return recordedFrontmostPIDs
   }
 
   private func recordMenuQuery(_ query: AXElementQuery) {
@@ -2392,6 +2399,11 @@ final class RecordingAccessibilityService: AccessibilityServicing, @unchecked Se
   func clickAt(x: Double, y: Double, button: String, clickCount: Int, targetPid: Int32?) throws {}
   func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?, targetPid: Int32?) throws {}
   func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws {}
+  func ensureFrontmost(pid: Int32?) {
+    lock.lock()
+    recordedFrontmostPIDs.append(pid)
+    lock.unlock()
+  }
 }
 
 final class RecordingAXTargetResolver: AXTargetResolving, @unchecked Sendable {
@@ -3246,6 +3258,7 @@ struct FakeAccessibilityService: AccessibilityServicing {
   func clickAt(x: Double, y: Double, button: String, clickCount: Int, targetPid: Int32?) throws {}
   func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?, targetPid: Int32?) throws {}
   func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws {}
+  func ensureFrontmost(pid: Int32?) {}
 }
 
 struct FakePermissionPrompter: AXPermissionPrompting {

@@ -19,6 +19,12 @@ public protocol AccessibilityServicing: Sendable {
   func clickAt(x: Double, y: Double, button: String, clickCount: Int, targetPid: Int32?) throws
   func scroll(query: AXElementQuery, deltaX: Int, deltaY: Int, x: Double?, y: Double?, targetPid: Int32?) throws
   func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, targetPid: Int32?) throws
+  /// Best-effort helper that raises the app owning `pid` to the front before a
+  /// control action so coordinate/keyboard events land on the intended app
+  /// instead of whatever window currently covers it. Never throws: a failed
+  /// raise must not block the action. No-op for nil/<=0 pids, terminated apps,
+  /// or an app that is already frontmost.
+  func ensureFrontmost(pid: Int32?)
 }
 
 /// Native AX operations for menu-bar status items. This narrow boundary keeps
@@ -983,6 +989,28 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     // Mouse up
     let upEvent = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: to, mouseButton: .left)
     postEvent(upEvent, targetPid: targetPid)
+  }
+
+  // MARK: - Frontmost raising
+
+  public func ensureFrontmost(pid: Int32?) {
+    guard let pid, pid > 0 else { return }
+    guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+    // Already frontmost: nothing to do, and no settle delay needed.
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+      return
+    }
+
+    // Same reliable pattern as perform(...)'s "activate" action: AX frontmost
+    // works with AX trust from a background agent; NSRunningApplication.activate()
+    // is the fallback. Best-effort — a failed raise must not block the action.
+    let appElement = AXUIElementCreateApplication(pid)
+    let axResult = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    if axResult != .success {
+      app.activate()
+    }
+    // Let the window server settle window ordering before any events are posted.
+    Thread.sleep(forTimeInterval: 0.2)
   }
 
   // MARK: - Event posting

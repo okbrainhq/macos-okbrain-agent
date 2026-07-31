@@ -265,6 +265,12 @@ public final class AgentRequestHandler: @unchecked Sendable {
     let targetPID = targetResolution?.pid ?? params.targetPid
     let ensureDispatchAuthorized: () throws -> Void = {
       try self.finalizeAccessibilityAuthorization(action: action, authorization: authorization)
+      // Raise the resolved target app to the front before any UI control action
+      // so coordinate/keyboard events land on the intended app rather than a
+      // window covering it. Read-only actions must not raise the app.
+      if self.accessibilityWriteActions.contains(action) {
+        self.accessibility.ensureFrontmost(pid: targetPID)
+      }
     }
 
     switch action {
