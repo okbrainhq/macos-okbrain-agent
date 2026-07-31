@@ -1271,8 +1271,87 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
     pid: 8123,
     frontmost: false
   )
+  let okDiskApp = ApplicationDescriptor(
+    bundleID: "com.example.OKDiskDev",
+    appName: "OKDisk Dev",
+    pid: 8124,
+    frontmost: false
+  )
+
+  let matchingCandidates = [
+    MenuBarExtraStatusItemCandidate(
+      title: "OKDisk",
+      description: "OKDisk primary status",
+      label: nil,
+      identifier: "okdisk.primary"
+    ),
+    MenuBarExtraStatusItemCandidate(
+      title: nil,
+      description: "OKDisk Idle",
+      label: "OKDisk status",
+      identifier: "okdisk.menu.icon"
+    )
+  ]
+  expectEqual(
+    MenuBarExtraStatusItemMatcher.matchingIndexes(query: "okdisk", candidates: matchingCandidates),
+    [0],
+    "status-item matching must prefer an exact title over a partial description"
+  )
+  expectEqual(
+    MenuBarExtraStatusItemMatcher.matchingIndexes(query: "OKDisk Idle", candidates: matchingCandidates),
+    [1],
+    "status-item matching must include AXDescription"
+  )
+  expectEqual(
+    MenuBarExtraStatusItemMatcher.matchingIndexes(query: "okdisk.menu.icon", candidates: matchingCandidates),
+    [1],
+    "status-item matching must include AXIdentifier"
+  )
+  expectEqual(
+    MenuBarExtraStatusItemMatcher.matchingIndexes(query: "Disk", candidates: matchingCandidates),
+    [0, 1],
+    "partial status-item matches must retain ambiguity"
+  )
+  let visibleCandidates = MenuBarExtraStatusItemMatcher.visibleCandidatesDescription(matchingCandidates)
+  expect(visibleCandidates.contains("description 'OKDisk Idle'"), "status-item errors must list visible descriptions")
+  expect(visibleCandidates.contains("identifier 'okdisk.menu.icon'"), "status-item errors must list visible identifiers")
+  expectEqual(
+    resolveUniqueRunningApplication(named: "okdisk", in: [statusApp, okDiskApp]),
+    .resolved(okDiskApp),
+    "running app resolution must allow a unique partial localized name"
+  )
+  let duplicateBundleFirst = ApplicationDescriptor(
+    bundleID: "com.example.DuplicateStatus",
+    appName: "Duplicate Status",
+    pid: 8130
+  )
+  let duplicateBundleSecond = ApplicationDescriptor(
+    bundleID: "com.example.DuplicateStatus",
+    appName: "Duplicate Status",
+    pid: 8131
+  )
+  expectEqual(
+    resolveUniqueRunningApplication(
+      named: "duplicate",
+      in: [duplicateBundleFirst, duplicateBundleSecond]
+    ),
+    .resolved(duplicateBundleFirst),
+    "running app resolution must deduplicate multiple processes with one bundle ID"
+  )
+  expectEqual(
+    resolveUniqueRunningApplication(
+      named: "status",
+      in: [
+        ApplicationDescriptor(bundleID: "com.example.StatusOne", appName: "Status One", pid: 8130),
+        ApplicationDescriptor(bundleID: "com.example.StatusTwo", appName: "Status Two", pid: 8131)
+      ]
+    ),
+    .ambiguous,
+    "partial running app resolution must reject ambiguous matches"
+  )
+
   let resolver = FakeApplicationResolver(
-    running: [statusApp],
+    running: [statusApp, okDiskApp],
     names: ["Status Owner": .resolved(statusApp)]
   )
   let extras = RecordingMenuBarExtrasService()
@@ -1285,6 +1364,16 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
   let appControlRule = AXAppPermissionRule(
     bundleID: statusApp.bundleID,
     appName: statusApp.appName,
+    mode: .control
+  )
+  let okDiskObserveRule = AXAppPermissionRule(
+    bundleID: okDiskApp.bundleID,
+    appName: okDiskApp.appName,
+    mode: .observe
+  )
+  let okDiskControlRule = AXAppPermissionRule(
+    bundleID: okDiskApp.bundleID,
+    appName: okDiskApp.appName,
     mode: .control
   )
 
@@ -1410,6 +1499,67 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
   expectEqual(extras.listTargets[1]?.pid, statusApp.pid, "filtered list must dispatch the re-resolved owner PID")
   expectEqual(extras.listTargets[1]?.bundleID, statusApp.bundleID, "filtered list must dispatch the authorized bundle")
 
+  let partialAppNameListHandler = makeHandler(
+    state: FunctionRuntimeState(),
+    coordinator: AXPermissionCoordinator(rules: [okDiskObserveRule])
+  )
+  let partialAppNameList: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menubar_list_partial_app_name",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.list", args: ["appName": .string("  okdisk  ")])
+    ),
+    to: partialAppNameListHandler
+  )
+  expect(partialAppNameList.ok, "menubar.list should resolve a unique partial running app name")
+  expectEqual(extras.listTargets.count, 3, "partial app-name list should call AX service")
+  expectEqual(extras.listTargets[2]?.bundleID, okDiskApp.bundleID, "partial app-name list must target OKDisk Dev")
+  guard let partialAppNameValue = partialAppNameList.data?.result.value,
+        case .object(let partialAppNameObject) = partialAppNameValue,
+        case .array(let partialAppNameItems)? = partialAppNameObject["items"],
+        case .object(let partialAppNameItem)? = partialAppNameItems.first else {
+    throw NSError(domain: "ProtocolVerifier", code: 24, userInfo: [NSLocalizedDescriptionKey: "Unexpected partial menubar.list result"])
+  }
+  expectEqual(partialAppNameItem["description"], .string("OKDisk Idle"), "menubar.list must expose the status-item description")
+  expectEqual(partialAppNameItem["identifier"], .string("okdisk.menu.icon"), "menubar.list must expose the status-item identifier")
+
+  let ambiguousOwnerOne = ApplicationDescriptor(
+    bundleID: "com.example.OKDiskAlpha",
+    appName: "OKDisk Alpha",
+    pid: 8140
+  )
+  let ambiguousOwnerTwo = ApplicationDescriptor(
+    bundleID: "com.example.OKDiskBeta",
+    appName: "OKDisk Beta",
+    pid: 8141
+  )
+  let ambiguityExtras = RecordingMenuBarExtrasService()
+  let ambiguityRegistry = FunctionRegistry.standard(
+    applicationResolver: FakeApplicationResolver(running: [ambiguousOwnerOne, ambiguousOwnerTwo]),
+    menuBarExtras: ambiguityExtras
+  )
+  let ambiguityHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .granted)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    functionRegistry: ambiguityRegistry,
+    functionState: FunctionRuntimeState(),
+    automationPermissions: FakeAutomationPermissionService(status: .authorized),
+    axPermissionCoordinator: AXPermissionCoordinator(),
+    axTargetResolver: FakeAXTargetResolver()
+  )
+  let ambiguousOwner: Envelope<EmptyPayload> = try send(
+    AgentRequest(
+      id: "menubar_list_ambiguous_owner",
+      action: "functions.run",
+      params: AgentRequestParams(functionName: "menubar.list", args: ["appName": .string("OKDisk")])
+    ),
+    to: ambiguityHandler
+  )
+  expect(!ambiguousOwner.ok, "menubar.list must reject an ambiguous partial owner name")
+  expectEqual(ambiguousOwner.error?.code, "invalid_request", "ambiguous menu-bar owner error code")
+  expectEqual(ambiguityExtras.listTargets.count, 0, "ambiguous menu-bar owner must not reach the AX service")
+
   let disabledOpenHandler = makeHandler(
     state: FunctionRuntimeState(),
     coordinator: AXPermissionCoordinator(rules: [appControlRule])
@@ -1474,6 +1624,25 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
   }
   expectEqual(menuItems.count, 2, "menubar.open should return top-level popup items")
 
+  let descriptionOpenHandler = makeHandler(
+    state: FunctionRuntimeState(enabledFunctionNames: ["menubar.open"]),
+    coordinator: AXPermissionCoordinator(rules: [okDiskControlRule])
+  )
+  let openedByDescription: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menubar_open_by_description",
+      action: "functions.run",
+      params: AgentRequestParams(
+        functionName: "menubar.open",
+        args: ["appName": .string("OKDisk"), "title": .string("OKDisk Idle")]
+      )
+    ),
+    to: descriptionOpenHandler
+  )
+  expect(openedByDescription.ok, "menubar.open should match a status item by AXDescription")
+  expectEqual(extras.openedTargets.last?.bundleID, okDiskApp.bundleID, "description match must resolve the partial OKDisk app name")
+  expectEqual(extras.openedTitles.last, "OKDisk Idle", "menubar.open should pass the description status-item match")
+
   for (title, expectedCode) in [("Disabled", "action_failed"), ("Missing", "element_not_found"), ("Ambiguous", "invalid_request")] {
     let failure: Envelope<EmptyPayload> = try send(
       AgentRequest(
@@ -1516,6 +1685,29 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
   }
   expectEqual(clickedPath, [.string("Settings…"), .string("General")], "menubar.click result path")
 
+  let identifierClickHandler = makeHandler(
+    state: FunctionRuntimeState(enabledFunctionNames: ["menubar.click"]),
+    coordinator: AXPermissionCoordinator(rules: [okDiskControlRule])
+  )
+  let clickedByIdentifier: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(
+      id: "menubar_click_by_identifier",
+      action: "functions.run",
+      params: AgentRequestParams(
+        functionName: "menubar.click",
+        args: [
+          "appName": .string("OKDisk"),
+          "title": .string("okdisk.menu.icon"),
+          "menuPath": .array([.string(" Quit ")])
+        ]
+      )
+    ),
+    to: identifierClickHandler
+  )
+  expect(clickedByIdentifier.ok, "menubar.click should match a status item by AXIdentifier")
+  expectEqual(extras.clickedTitles.last, "okdisk.menu.icon", "menubar.click should pass the identifier status-item match")
+  expectEqual(extras.clickedPaths.last, ["Quit"], "identifier match should retain menu-path normalization")
+
   let invalidClickRequests: [(String, [String: JSONValue])] = [
     ("missing_title", ["appName": .string("Status Owner"), "menuPath": .array([.string("Settings…")])]),
     ("empty_path", ["appName": .string("Status Owner"), "title": .string("VPN"), "menuPath": .array([])]),
@@ -1530,6 +1722,64 @@ func verifyMenuBarExtraFunctions(configuration: AgentConfiguration, screenshot: 
     expect(!invalid.ok, "menubar.click \(suffix) should fail validation")
     expectEqual(invalid.error?.code, "invalid_args", "menubar.click \(suffix) validation code")
   }
+
+  let responsiveProbe = AXMenuBarExtraAppTarget(
+    pid: statusApp.pid ?? 8123,
+    appName: statusApp.appName,
+    bundleID: statusApp.bundleID
+  )
+  let slowProbe = AXMenuBarExtraAppTarget(
+    pid: 8132,
+    appName: "Slow Status Owner",
+    bundleID: "com.example.SlowStatusOwner"
+  )
+  let prohibitedProbe = AXMenuBarExtraAppTarget(
+    pid: 8133,
+    appName: "Prohibited Background Process",
+    bundleID: "com.example.ProhibitedBackground"
+  )
+  let boundedListExtras = RecordingMenuBarExtrasService(unfilteredProbes: [
+    .init(target: responsiveProbe),
+    .init(target: slowProbe, shouldFail: true),
+    .init(target: prohibitedProbe, hasUI: false)
+  ])
+  let boundedListRegistry = FunctionRegistry.standard(
+    applicationResolver: resolver,
+    menuBarExtras: boundedListExtras
+  )
+  let boundedListHandler = AgentRequestHandler(
+    configuration: configuration,
+    permissions: FakePermissionService(payload: .init(screenRecording: .denied, accessibility: .granted)),
+    screenshots: FakeScreenshotService(capturedImage: screenshot),
+    functionRegistry: boundedListRegistry,
+    functionState: FunctionRuntimeState(),
+    automationPermissions: FakeAutomationPermissionService(status: .authorized),
+    axPermissionCoordinator: AXPermissionCoordinator(rules: [
+      AXAppPermissionRule(target: GlobalPermissionCategory.menuBarExtras.permissionTarget, mode: .observe)
+    ]),
+    axTargetResolver: FakeAXTargetResolver()
+  )
+  let boundedList: Envelope<FunctionRunPayload> = try send(
+    AgentRequest(id: "menubar_list_skip_slow", action: "functions.run", params: AgentRequestParams(functionName: "menubar.list", args: [:])),
+    to: boundedListHandler
+  )
+  expect(boundedList.ok, "unfiltered menubar.list should keep successful apps when one probe errors")
+  guard let boundedListValue = boundedList.data?.result.value,
+        case .object(let boundedListObject) = boundedListValue,
+        case .array(let boundedListItems)? = boundedListObject["items"] else {
+    throw NSError(domain: "ProtocolVerifier", code: 25, userInfo: [NSLocalizedDescriptionKey: "Unexpected bounded menubar.list result"])
+  }
+  expectEqual(boundedListItems.count, 1, "a slow/erroring menu-bar owner must be skipped")
+  expectEqual(
+    boundedListExtras.unfilteredProbedTargets.map(\.bundleID),
+    [responsiveProbe.bundleID, slowProbe.bundleID],
+    "unfiltered listing must not probe processes that cannot have UI"
+  )
+  expectEqual(
+    boundedListExtras.skippedUnfilteredTargets.map(\.bundleID),
+    [slowProbe.bundleID],
+    "unfiltered listing must skip an app whose bounded AX probe errors"
+  )
 
   let stopped = ApplicationDescriptor(bundleID: "com.example.StoppedStatus", appName: "Stopped Status")
   let stoppedPrompter = CountingPermissionPrompter(response: .allowAlways)
@@ -2686,12 +2936,39 @@ struct FakeAutomationPermissionService: AutomationPermissionServicing {
 }
 
 final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Sendable {
+  struct UnfilteredListProbe {
+    let target: AXMenuBarExtraAppTarget
+    let hasUI: Bool
+    let shouldFail: Bool
+
+    init(target: AXMenuBarExtraAppTarget, hasUI: Bool = true, shouldFail: Bool = false) {
+      self.target = target
+      self.hasUI = hasUI
+      self.shouldFail = shouldFail
+    }
+  }
+
+  private static let defaultTarget = AXMenuBarExtraAppTarget(
+    pid: 8123,
+    appName: "Status Owner",
+    bundleID: "com.example.StatusOwner"
+  )
+
   private let lock = NSLock()
+  private let unfilteredProbes: [UnfilteredListProbe]
   private var storedListTargets: [AXMenuBarExtraAppTarget?] = []
   private var storedOpenedTargets: [AXMenuBarExtraAppTarget] = []
   private var storedOpenedTitles: [String] = []
   private var storedClickedTitles: [String] = []
   private var storedClickedPaths: [[String]] = []
+  private var storedUnfilteredProbedTargets: [AXMenuBarExtraAppTarget] = []
+  private var storedSkippedUnfilteredTargets: [AXMenuBarExtraAppTarget] = []
+
+  init(unfilteredProbes: [UnfilteredListProbe] = []) {
+    self.unfilteredProbes = unfilteredProbes.isEmpty
+      ? [UnfilteredListProbe(target: Self.defaultTarget)]
+      : unfilteredProbes
+  }
 
   var listTargets: [AXMenuBarExtraAppTarget?] {
     lock.lock()
@@ -2723,11 +3000,40 @@ final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Se
     return storedClickedPaths
   }
 
+  var unfilteredProbedTargets: [AXMenuBarExtraAppTarget] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedUnfilteredProbedTargets
+  }
+
+  var skippedUnfilteredTargets: [AXMenuBarExtraAppTarget] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedSkippedUnfilteredTargets
+  }
+
   func listMenuBarExtras(app: AXMenuBarExtraAppTarget?) throws -> AXMenuBarExtrasListPayload {
     lock.lock()
     storedListTargets.append(app)
     lock.unlock()
-    return AXMenuBarExtrasListPayload(items: [statusItem(for: app ?? defaultTarget)])
+
+    if let app {
+      return AXMenuBarExtrasListPayload(items: [statusItem(for: app)])
+    }
+
+    let items = collectUnfilteredMenuBarExtraItems(
+      from: unfilteredProbes,
+      shouldInspect: { $0.hasUI },
+      inspect: { probe in
+        self.recordUnfilteredProbe(probe.target)
+        guard !probe.shouldFail else {
+          self.recordSkippedUnfilteredProbe(probe.target)
+          throw AgentProtocolError.actionFailed("Simulated AX timeout for \(probe.target.appName)")
+        }
+        return [self.statusItem(for: probe.target)]
+      }
+    )
+    return AXMenuBarExtrasListPayload(items: items)
   }
 
   func openMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String) throws -> AXMenuBarExtraOpenPayload {
@@ -2741,6 +3047,7 @@ final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Se
     default:
       break
     }
+    try requireMatchingStatusItem(title, for: app)
     lock.lock()
     storedOpenedTargets.append(app)
     storedOpenedTitles.append(title)
@@ -2766,6 +3073,7 @@ final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Se
     title: String,
     menuPath: [String]
   ) throws -> AXMenuBarExtraClickPayload {
+    try requireMatchingStatusItem(title, for: app)
     lock.lock()
     storedClickedTitles.append(title)
     storedClickedPaths.append(menuPath)
@@ -2781,12 +3089,49 @@ final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Se
     )
   }
 
-  private var defaultTarget: AXMenuBarExtraAppTarget {
-    AXMenuBarExtraAppTarget(pid: 8123, appName: "Status Owner", bundleID: "com.example.StatusOwner")
+  private func recordUnfilteredProbe(_ target: AXMenuBarExtraAppTarget) {
+    lock.lock()
+    storedUnfilteredProbedTargets.append(target)
+    lock.unlock()
+  }
+
+  private func recordSkippedUnfilteredProbe(_ target: AXMenuBarExtraAppTarget) {
+    lock.lock()
+    storedSkippedUnfilteredTargets.append(target)
+    lock.unlock()
+  }
+
+  private func requireMatchingStatusItem(_ title: String, for app: AXMenuBarExtraAppTarget) throws {
+    let item = statusItem(for: app)
+    let candidate = MenuBarExtraStatusItemCandidate(
+      title: item.title,
+      description: item.description,
+      label: item.label,
+      identifier: item.identifier
+    )
+    guard !MenuBarExtraStatusItemMatcher.matchingIndexes(query: title, candidates: [candidate]).isEmpty else {
+      throw AgentProtocolError.elementNotFound(
+        "Status item '\(title)' not found in \(app.appName). Visible status items: \(candidate.visibleDescription)"
+      )
+    }
   }
 
   private func statusItem(for app: AXMenuBarExtraAppTarget) -> AXMenuBarExtraPayload {
-    AXMenuBarExtraPayload(
+    if app.bundleID.caseInsensitiveCompare("com.example.OKDiskDev") == .orderedSame {
+      return AXMenuBarExtraPayload(
+        appName: app.appName,
+        bundleID: app.bundleID,
+        pid: app.pid,
+        title: nil,
+        label: "OKDisk Idle",
+        identifier: "okdisk.menu.icon",
+        description: "OKDisk Idle",
+        enabled: true,
+        frame: CaptureRect(x: 1200, y: 0, width: 24, height: 24)
+      )
+    }
+
+    return AXMenuBarExtraPayload(
       appName: app.appName,
       bundleID: app.bundleID,
       pid: app.pid,
@@ -2800,7 +3145,7 @@ final class RecordingMenuBarExtrasService: MenuBarExtrasServicing, @unchecked Se
   }
 }
 
-struct FakeApplicationResolver: ApplicationResolving {
+struct FakeApplicationResolver: ApplicationResolving, RunningApplicationNameResolving {
   let runningByBundleID: [String: ApplicationDescriptor]
   let resolvableByBundleID: [String: ApplicationDescriptor]
   let nameResolutions: [String: ApplicationNameResolution]
@@ -2829,6 +3174,10 @@ struct FakeApplicationResolver: ApplicationResolving {
 
   func resolveApplication(named name: String) -> ApplicationNameResolution {
     nameResolutions[name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] ?? .notFound
+  }
+
+  func resolveRunningApplication(named name: String) -> ApplicationNameResolution {
+    resolveUniqueRunningApplication(named: name, in: Array(runningByBundleID.values))
   }
 }
 

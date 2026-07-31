@@ -189,7 +189,7 @@ A Tier-1 function is *catalog-enabled* by default, but it is **not permission-en
 | Function | Permission target | Notes |
 | --- | --- | --- |
 | `app.launch` / `app.activate` / `app.quit` | requested app bundle | `quit` remains graceful only |
-| `menubar.open` / `menubar.click` | running owner app | Native AX popup opening/navigation; status item title can match title, label, or identifier |
+| `menubar.open` / `menubar.click` | running owner app | Native AX popup opening/navigation; status item title can match AX title, description, label, or identifier |
 | `system.set-volume` / `system.mute` | System Audio | fixed bounded input |
 | `system.set-clipboard` | Clipboard | plain text only |
 | `system.notify` | Notifications | fixed OkBrain Agent branding |
@@ -208,8 +208,8 @@ These are catalog functions, not new `ax.*` protocol actions. Discover their exa
 } }
 ```
 
-- All three functions also require the process-level macOS **Accessibility** grant. Omitting `appName` from `menubar.list` enumerates every running app that exposes `AXExtrasMenuBar` and requires the global **Menu Bar Extras** Observe grant. Supplying `appName` limits the read to one currently running, app-authorized owner.
-- `menubar.open` requires `{ appName, title }`, Control for that owner app, and returns the opened popup's top-level items. `title` is matched case-insensitively after trimming against the status item's title, label, or identifier; ambiguous matches fail.
+- All three functions also require the process-level macOS **Accessibility** grant. Omitting `appName` from `menubar.list` enumerates eligible running apps that expose `AXExtrasMenuBar` and requires the global **Menu Bar Extras** Observe grant. Supplying `appName` limits the read to one currently running, app-authorized owner: resolution tries an exact localized name first, then a unique case-insensitive partial localized-name match; ambiguous owner names return `invalid_request`.
+- `menubar.open` requires `{ appName, title }`, Control for that owner app, and returns the opened popup's top-level items. `title` is normalized and matched case-insensitively against AX title, AX description, AX label, and AX identifier, with exact matches considered before contains matches; ambiguous matches fail and status-item errors list the visible candidates.
 - `menubar.click` requires `{ appName, title, menuPath }`, where `menuPath` is a non-empty array of non-empty strings such as `["Settings…", "General"]`. It opens the status item, navigates the hierarchy, presses the final item, and returns the normalized path.
 
 **Tier 3 — elevated (off by default + explicit Control):**

@@ -30,9 +30,110 @@ public protocol MenuBarExtrasServicing: Sendable {
   func clickMenuBarExtra(app: AXMenuBarExtraAppTarget, title: String, menuPath: [String]) throws -> AXMenuBarExtraClickPayload
 }
 
+/// AX status items do not consistently populate AXTitle. Keep the values that
+/// callers can discover and use to select an item together, so matching does
+/// not accidentally substitute one field for another.
+struct MenuBarExtraStatusItemCandidate: Equatable, Sendable {
+  let title: String?
+  let description: String?
+  let label: String?
+  let identifier: String?
+
+  init(title: String?, description: String?, label: String?, identifier: String?) {
+    self.title = MenuBarExtraStatusItemMatcher.normalizedText(title)
+    self.description = MenuBarExtraStatusItemMatcher.normalizedText(description)
+    self.label = MenuBarExtraStatusItemMatcher.normalizedText(label)
+    self.identifier = MenuBarExtraStatusItemMatcher.normalizedText(identifier)
+  }
+
+  var matchValues: Set<String> {
+    Set([title, description, identifier, label].compactMap { $0 }.map(MenuBarExtraStatusItemMatcher.normalizedMatch))
+  }
+
+  var visibleDescription: String {
+    var fields: [String] = []
+    if let description {
+      fields.append("description '\(description)'")
+    }
+    if let title {
+      fields.append("title '\(title)'")
+    }
+    if let identifier {
+      fields.append("identifier '\(identifier)'")
+    }
+    if let label, label != description, label != title, label != identifier {
+      fields.append("label '\(label)'")
+    }
+    return fields.isEmpty ? "unnamed status item" : fields.joined(separator: ", ")
+  }
+}
+
+enum MenuBarExtraStatusItemMatcher {
+  static func normalizedText(_ raw: String?) -> String? {
+    guard let raw else { return nil }
+    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+
+  static func normalizedMatch(_ raw: String?) -> String {
+    let value = normalizedText(raw) ?? ""
+    return value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+  }
+
+  /// Returns exact matches across every supported value first. Only when none
+  /// are exact does it return contains matches, preserving deterministic and
+  /// safe selection for dynamic status-item labels.
+  static func matchingIndexes(query rawQuery: String, candidates: [MenuBarExtraStatusItemCandidate]) -> [Int] {
+    let query = normalizedMatch(rawQuery)
+    guard !query.isEmpty else { return [] }
+
+    let exact = candidates.indices.filter { candidates[$0].matchValues.contains(query) }
+    if !exact.isEmpty {
+      return exact
+    }
+    return candidates.indices.filter { candidateIndex in
+      candidates[candidateIndex].matchValues.contains { $0.contains(query) }
+    }
+  }
+
+  static func visibleCandidatesDescription(_ candidates: [MenuBarExtraStatusItemCandidate]) -> String {
+    let values = candidates.map { $0.visibleDescription }
+    return values.isEmpty ? "none" : values.joined(separator: "; ")
+  }
+}
+
+/// Global discovery must remain useful when one third-party menu-bar owner is
+/// stalled. The caller supplies its bounded probe; failed probes are skipped.
+func collectUnfilteredMenuBarExtraItems<App, Item>(
+  from applications: [App],
+  shouldInspect: (App) -> Bool,
+  inspect: (App) throws -> [Item]
+) -> [Item] {
+  var items: [Item] = []
+  for application in applications where shouldInspect(application) {
+    do {
+      items.append(contentsOf: try inspect(application))
+    } catch {
+      continue
+    }
+  }
+  return items
+}
+
 public final class SystemAccessibilityService: AccessibilityServicing, MenuBarExtrasServicing, @unchecked Sendable {
   private static let maxValueLength = 2_000
   private static let maxTypeTextLength = 10_000
+  private static let menuBarExtraListMessagingTimeout: Float = 0.75
+  private static let menuBarExtraListItemAttributes: [String] = [
+    kAXRoleAttribute,
+    kAXTitleAttribute,
+    kAXDescriptionAttribute,
+    "AXLabel",
+    kAXIdentifierAttribute,
+    kAXEnabledAttribute,
+    kAXPositionAttribute,
+    kAXSizeAttribute
+  ]
 
   private static let actionMap: [String: String] = [
     "press": kAXPressAction,
@@ -343,25 +444,21 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
 
   public func listMenuBarExtras(app: AXMenuBarExtraAppTarget?) throws -> AXMenuBarExtrasListPayload {
     try requireAccessibilityTrust()
-    let applications: [NSRunningApplication]
+
+    // A caller that selected one owner should receive its normal AX error. The
+    // best-effort behavior below is intentionally reserved for global discovery.
     if let app {
-      applications = [try resolveMenuBarExtraApp(app)]
-    } else {
-      applications = NSWorkspace.shared.runningApplications
-        .filter { !$0.isTerminated }
-        .sorted { menuBarExtraAppName($0).localizedCaseInsensitiveCompare(menuBarExtraAppName($1)) == .orderedAscending }
+      let application = try resolveMenuBarExtraApp(app)
+      return AXMenuBarExtrasListPayload(items: try menuBarExtraPayloads(for: application))
     }
 
-    var items: [AXMenuBarExtraPayload] = []
-    for application in applications {
-      let appElement = AXUIElementCreateApplication(application.processIdentifier)
-      guard let extrasMenuBar = axElement(from: copyAttribute(appElement, kAXExtrasMenuBarAttribute)) else {
-        continue
-      }
-      for item in immediateChildren(of: extrasMenuBar, role: kAXMenuBarItemRole) {
-        items.append(menuBarExtraPayload(for: item, app: application))
-      }
-    }
+    let applications = NSWorkspace.shared.runningApplications
+      .sorted { menuBarExtraAppName($0).localizedCaseInsensitiveCompare(menuBarExtraAppName($1)) == .orderedAscending }
+    let items = collectUnfilteredMenuBarExtraItems(
+      from: applications,
+      shouldInspect: { !$0.isTerminated && $0.activationPolicy != .prohibited },
+      inspect: { try boundedMenuBarExtraPayloads(for: $0) }
+    )
     return AXMenuBarExtrasListPayload(items: items)
   }
 
@@ -683,6 +780,10 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     case invalidUIElement
   }
 
+  private enum MenuBarExtraListingError: Error {
+    case accessibility(AXError)
+  }
+
   private func menuBarExtraAppName(_ app: NSRunningApplication) -> String {
     app.localizedName ?? app.bundleIdentifier ?? "Unknown app"
   }
@@ -712,19 +813,144 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     return extrasMenuBar
   }
 
-  private func menuBarExtraPayload(for item: AXUIElement, app: NSRunningApplication) -> AXMenuBarExtraPayload {
-    let description = normalizedMenuBarExtraText(stringAttribute(item, kAXDescriptionAttribute))
-    let label = normalizedMenuBarExtraText(stringAttribute(item, "AXLabel")) ?? description
-    return AXMenuBarExtraPayload(
-      appName: menuBarExtraAppName(app),
-      bundleID: app.bundleIdentifier,
-      pid: app.processIdentifier,
-      title: normalizedMenuBarExtraText(stringAttribute(item, kAXTitleAttribute)),
+  private func menuBarExtraPayloads(for app: NSRunningApplication) throws -> [AXMenuBarExtraPayload] {
+    let appElement = AXUIElementCreateApplication(app.processIdentifier)
+    var value: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(appElement, kAXExtrasMenuBarAttribute as CFString, &value)
+    let extrasMenuBar: AXUIElement
+    switch result {
+    case .success:
+      guard let element = axElement(from: value) else { return [] }
+      extrasMenuBar = element
+    case .noValue, .attributeUnsupported:
+      // Preserve the list contract for an app that simply owns no extras.
+      return []
+    default:
+      throw AgentProtocolError.actionFailed(
+        "Unable to list menu bar extras in \(menuBarExtraAppName(app)) (\(describe(result)))"
+      )
+    }
+
+    return immediateChildren(of: extrasMenuBar, role: kAXMenuBarItemRole).map {
+      menuBarExtraPayload(for: $0, app: app)
+    }
+  }
+
+  /// Uses a short timeout on every AX object touched by global discovery. AX
+  /// timeouts belong to a particular AXUIElement, so setting only the app
+  /// object would not bound reads on the extras bar or its status items.
+  private func boundedMenuBarExtraPayloads(for app: NSRunningApplication) throws -> [AXMenuBarExtraPayload] {
+    let appElement = AXUIElementCreateApplication(app.processIdentifier)
+    try setMenuBarExtraListMessagingTimeout(on: appElement)
+    guard let extrasMenuBar = axElement(from: try boundedMenuBarExtraAttribute(appElement, kAXExtrasMenuBarAttribute)) else {
+      return []
+    }
+
+    try setMenuBarExtraListMessagingTimeout(on: extrasMenuBar)
+    let items = try boundedMenuBarExtraChildren(of: extrasMenuBar)
+    return try items.compactMap { item in
+      try boundedMenuBarExtraPayload(for: item, app: app)
+    }
+  }
+
+  private func setMenuBarExtraListMessagingTimeout(on element: AXUIElement) throws {
+    let result = AXUIElementSetMessagingTimeout(element, Self.menuBarExtraListMessagingTimeout)
+    guard result == .success else {
+      throw MenuBarExtraListingError.accessibility(result)
+    }
+  }
+
+  private func boundedMenuBarExtraAttribute(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
+    var value: CFTypeRef?
+    let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    switch result {
+    case .success:
+      return value
+    case .noValue, .attributeUnsupported:
+      return nil
+    default:
+      throw MenuBarExtraListingError.accessibility(result)
+    }
+  }
+
+  private func boundedMenuBarExtraChildren(of extrasMenuBar: AXUIElement) throws -> [AXUIElement] {
+    if let children = try boundedMenuBarExtraAttribute(extrasMenuBar, kAXChildrenAttribute) as? [AXUIElement], !children.isEmpty {
+      return children
+    }
+    return try boundedMenuBarExtraAttribute(extrasMenuBar, kAXVisibleChildrenAttribute) as? [AXUIElement] ?? []
+  }
+
+  private func boundedMenuBarExtraPayload(
+    for item: AXUIElement,
+    app: NSRunningApplication
+  ) throws -> AXMenuBarExtraPayload? {
+    try setMenuBarExtraListMessagingTimeout(on: item)
+    guard let attributes = try boundedMenuBarExtraAttributeValues(of: item),
+          let role = stringValue(from: attributes[0]),
+          role.caseInsensitiveCompare(kAXMenuBarItemRole) == .orderedSame else {
+      return nil
+    }
+
+    let title = MenuBarExtraStatusItemMatcher.normalizedText(stringValue(from: attributes[1]))
+    let description = MenuBarExtraStatusItemMatcher.normalizedText(stringValue(from: attributes[2]))
+    let label = MenuBarExtraStatusItemMatcher.normalizedText(stringValue(from: attributes[3])) ?? description
+    let identifier = MenuBarExtraStatusItemMatcher.normalizedText(stringValue(from: attributes[4]))
+    return makeMenuBarExtraPayload(
+      for: app,
+      title: title,
       label: label,
-      identifier: normalizedMenuBarExtraText(stringAttribute(item, kAXIdentifierAttribute)),
+      identifier: identifier,
+      description: description,
+      enabled: boolValue(from: attributes[5]) ?? true,
+      frame: frameFromCFTypes(position: attributes[6], size: attributes[7])
+    )
+  }
+
+  private func boundedMenuBarExtraAttributeValues(of element: AXUIElement) throws -> [CFTypeRef?]? {
+    let names = Self.menuBarExtraListItemAttributes
+    let attributeNames = names.map { $0 as CFString } as CFArray
+    var outValues: CFArray?
+    let result = AXUIElementCopyMultipleAttributeValues(element, attributeNames, [], &outValues)
+    guard result == .success else {
+      throw MenuBarExtraListingError.accessibility(result)
+    }
+    guard let outValues else { return nil }
+    return decodedAttributeValues(outValues, expectedCount: names.count)
+  }
+
+  private func menuBarExtraPayload(for item: AXUIElement, app: NSRunningApplication) -> AXMenuBarExtraPayload {
+    let description = MenuBarExtraStatusItemMatcher.normalizedText(stringAttribute(item, kAXDescriptionAttribute))
+    let label = MenuBarExtraStatusItemMatcher.normalizedText(stringAttribute(item, "AXLabel")) ?? description
+    return makeMenuBarExtraPayload(
+      for: app,
+      title: MenuBarExtraStatusItemMatcher.normalizedText(stringAttribute(item, kAXTitleAttribute)),
+      label: label,
+      identifier: MenuBarExtraStatusItemMatcher.normalizedText(stringAttribute(item, kAXIdentifierAttribute)),
       description: description,
       enabled: boolAttribute(item, kAXEnabledAttribute) ?? true,
       frame: frame(of: item)
+    )
+  }
+
+  private func makeMenuBarExtraPayload(
+    for app: NSRunningApplication,
+    title: String?,
+    label: String?,
+    identifier: String?,
+    description: String?,
+    enabled: Bool,
+    frame: CaptureRect?
+  ) -> AXMenuBarExtraPayload {
+    AXMenuBarExtraPayload(
+      appName: menuBarExtraAppName(app),
+      bundleID: app.bundleIdentifier,
+      pid: app.processIdentifier,
+      title: title,
+      label: label,
+      identifier: identifier,
+      description: description,
+      enabled: enabled,
+      frame: frame
     )
   }
 
@@ -793,28 +1019,43 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     matching rawTitle: String,
     appName: String
   ) throws -> AXUIElement {
-    let candidates = immediateChildren(of: extrasMenuBar, role: kAXMenuBarItemRole)
-    let title = normalizedMenuBarExtraMatch(rawTitle)
-    let exactMatches = candidates.filter { item in
-      menuBarExtraMatchValues(for: item).contains(title)
+    let items = immediateChildren(of: extrasMenuBar, role: kAXMenuBarItemRole)
+    let candidates = items.map { menuBarExtraStatusItemCandidate(for: $0) }
+    let matchingIndexes = MenuBarExtraStatusItemMatcher.matchingIndexes(query: rawTitle, candidates: candidates)
+
+    if matchingIndexes.count == 1, let index = matchingIndexes.first {
+      return items[index]
     }
-    if exactMatches.count == 1, let item = exactMatches.first {
-      return item
-    }
-    if exactMatches.count > 1 {
-      throw menuBarExtraAmbiguityError(kind: "status items", title: rawTitle, appName: appName)
+    if matchingIndexes.count > 1 {
+      throw menuBarExtraStatusItemAmbiguityError(
+        title: rawTitle,
+        appName: appName,
+        candidates: candidates
+      )
     }
 
-    let partialMatches = candidates.filter { item in
-      menuBarExtraMatchValues(for: item).contains { $0.contains(title) }
-    }
-    if partialMatches.count == 1, let item = partialMatches.first {
-      return item
-    }
-    if partialMatches.count > 1 {
-      throw menuBarExtraAmbiguityError(kind: "status items", title: rawTitle, appName: appName)
-    }
-    throw AgentProtocolError.elementNotFound("Status item '\(rawTitle)' not found in \(appName)")
+    throw AgentProtocolError.elementNotFound(
+      "Status item '\(rawTitle)' not found in \(appName). Visible status items: \(MenuBarExtraStatusItemMatcher.visibleCandidatesDescription(candidates))"
+    )
+  }
+
+  private func menuBarExtraStatusItemCandidate(for item: AXUIElement) -> MenuBarExtraStatusItemCandidate {
+    MenuBarExtraStatusItemCandidate(
+      title: stringAttribute(item, kAXTitleAttribute),
+      description: stringAttribute(item, kAXDescriptionAttribute),
+      label: stringAttribute(item, "AXLabel"),
+      identifier: stringAttribute(item, kAXIdentifierAttribute)
+    )
+  }
+
+  private func menuBarExtraStatusItemAmbiguityError(
+    title: String,
+    appName: String,
+    candidates: [MenuBarExtraStatusItemCandidate]
+  ) -> AgentProtocolError {
+    AgentProtocolError.invalidRequest(
+      "Multiple status items match '\(title)' in \(appName). Visible status items: \(MenuBarExtraStatusItemMatcher.visibleCandidatesDescription(candidates)). Use a title, description, label, or identifier that uniquely identifies one item"
+    )
   }
 
   private func findMenuBarExtraMenuItem(
@@ -849,34 +1090,13 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     throw AgentProtocolError.elementNotFound("Menu item '\(rawTitle)' not found\(parentDescription) in \(appName)")
   }
 
-  private func menuBarExtraMatchValues(for item: AXUIElement) -> Set<String> {
-    let description = stringAttribute(item, kAXDescriptionAttribute)
-    let label = stringAttribute(item, "AXLabel") ?? description
-    return [
-      stringAttribute(item, kAXTitleAttribute),
-      label,
-      stringAttribute(item, kAXIdentifierAttribute)
-    ].compactMap(normalizedMenuBarExtraText)
-    .map { normalizedMenuBarExtraMatch($0) }
-    .reduce(into: Set<String>()) { values, value in
-      values.insert(value)
-    }
-  }
-
-  private func normalizedMenuBarExtraText(_ raw: String?) -> String? {
-    guard let raw else { return nil }
-    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    return value.isEmpty ? nil : value
-  }
-
   private func normalizedMenuBarExtraMatch(_ raw: String?) -> String {
-    let value = normalizedMenuBarExtraText(raw) ?? ""
-    return value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+    MenuBarExtraStatusItemMatcher.normalizedMatch(raw)
   }
 
   private func menuBarExtraAmbiguityError(kind: String, title: String, appName: String) -> AgentProtocolError {
     AgentProtocolError.invalidRequest(
-      "Multiple \(kind) match '\(title)' in \(appName); use a title, label, or identifier that uniquely identifies one item"
+      "Multiple \(kind) match '\(title)' in \(appName); use a title, description, label, or identifier that uniquely identifies one item"
     )
   }
 
@@ -1391,9 +1611,12 @@ public final class SystemAccessibilityService: AccessibilityServicing, MenuBarEx
     let result = AXUIElementCopyMultipleAttributeValues(element, attrArray, [], &outValues)
 
     guard result == .success, let values = outValues else { return nil }
+    return decodedAttributeValues(values, expectedCount: Self.batchAttributes.count)
+  }
 
+  private func decodedAttributeValues(_ values: CFArray, expectedCount: Int) -> [CFTypeRef?]? {
     let count = CFArrayGetCount(values)
-    guard count == Self.batchAttributes.count else { return nil }
+    guard count == expectedCount else { return nil }
 
     var out: [CFTypeRef?] = []
     out.reserveCapacity(count)
