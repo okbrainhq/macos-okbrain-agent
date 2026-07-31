@@ -86,6 +86,9 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
   public var targetPid: Int32?
   public var compact: Bool?
   public var toX: Double?
+  /// Decoded from the shared JSON `path` key when it is an array of menu titles.
+  /// `path` remains the string-valued file editing parameter for compatibility.
+  public var menuPath: [String]?
   public var toY: Double?
 
   // Curated macOS function params
@@ -158,6 +161,7 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     targetPid: Int32? = nil,
     compact: Bool? = nil,
     toX: Double? = nil,
+    menuPath: [String]? = nil,
     toY: Double? = nil,
     functionName: String? = nil,
     args: [String: JSONValue]? = nil,
@@ -224,6 +228,7 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     self.targetPid = targetPid
     self.compact = compact
     self.toX = toX
+    self.menuPath = menuPath
     self.toY = toY
     self.functionName = functionName
     self.args = args
@@ -305,6 +310,79 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     case timeoutSeconds
   }
 
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encodeIfPresent(mode, forKey: .mode)
+    try container.encodeIfPresent(format, forKey: .format)
+    try container.encodeIfPresent(includeCursor, forKey: .includeCursor)
+    try container.encodeIfPresent(quality, forKey: .quality)
+    try container.encodeIfPresent(appName, forKey: .appName)
+    try container.encodeIfPresent(windowId, forKey: .windowId)
+    try container.encodeIfPresent(rect, forKey: .rect)
+    if let menuPath {
+      try container.encode(menuPath, forKey: .path)
+    } else {
+      try container.encodeIfPresent(path, forKey: .path)
+    }
+    try container.encodeIfPresent(recursive, forKey: .recursive)
+    try container.encodeIfPresent(glob, forKey: .glob)
+    try container.encodeIfPresent(includeHidden, forKey: .includeHidden)
+    try container.encodeIfPresent(respectGitignore, forKey: .respectGitignore)
+    try container.encodeIfPresent(limit, forKey: .limit)
+    try container.encodeIfPresent(startLine, forKey: .startLine)
+    try container.encodeIfPresent(endLine, forKey: .endLine)
+    try container.encodeIfPresent(maxBytes, forKey: .maxBytes)
+    try container.encodeIfPresent(encoding, forKey: .encoding)
+    try container.encodeIfPresent(content, forKey: .content)
+    try container.encodeIfPresent(createDirs, forKey: .createDirs)
+    try container.encodeIfPresent(expectedSha256, forKey: .expectedSha256)
+    try container.encodeIfPresent(backup, forKey: .backup)
+    try container.encodeIfPresent(edits, forKey: .edits)
+    try container.encodeIfPresent(whitespaceNormalizedFallback, forKey: .whitespaceNormalizedFallback)
+    try container.encodeIfPresent(dryRun, forKey: .dryRun)
+    try container.encodeIfPresent(query, forKey: .query)
+    try container.encodeIfPresent(regex, forKey: .regex)
+    try container.encodeIfPresent(maxResults, forKey: .maxResults)
+    try container.encodeIfPresent(pid, forKey: .pid)
+    try container.encodeIfPresent(windowTitle, forKey: .windowTitle)
+    try container.encodeIfPresent(windowIndex, forKey: .windowIndex)
+    try container.encodeIfPresent(role, forKey: .role)
+    try container.encodeIfPresent(title, forKey: .title)
+    try container.encodeIfPresent(label, forKey: .label)
+    try container.encodeIfPresent(identifier, forKey: .identifier)
+    try container.encodeIfPresent(valueContains, forKey: .valueContains)
+    try container.encodeIfPresent(index, forKey: .index)
+    try container.encodeIfPresent(value, forKey: .value)
+    try container.encodeIfPresent(depth, forKey: .depth)
+    try container.encodeIfPresent(maxElements, forKey: .maxElements)
+    try container.encodeIfPresent(allWindows, forKey: .allWindows)
+    try container.encodeIfPresent(scope, forKey: .scope)
+    try container.encodeIfPresent(action, forKey: .action)
+    try container.encodeIfPresent(x, forKey: .x)
+    try container.encodeIfPresent(y, forKey: .y)
+    try container.encodeIfPresent(button, forKey: .button)
+    try container.encodeIfPresent(clickCount, forKey: .clickCount)
+    try container.encodeIfPresent(key, forKey: .key)
+    try container.encodeIfPresent(modifiers, forKey: .modifiers)
+    try container.encodeIfPresent(text, forKey: .text)
+    try container.encodeIfPresent(deltaX, forKey: .deltaX)
+    try container.encodeIfPresent(deltaY, forKey: .deltaY)
+    try container.encodeIfPresent(targetPid, forKey: .targetPid)
+    try container.encodeIfPresent(compact, forKey: .compact)
+    try container.encodeIfPresent(toX, forKey: .toX)
+    try container.encodeIfPresent(toY, forKey: .toY)
+    try container.encodeIfPresent(functionName, forKey: .functionName)
+    try container.encodeIfPresent(args, forKey: .args)
+    try container.encodeIfPresent(name, forKey: .name)
+    try container.encodeIfPresent(description, forKey: .description)
+    try container.encodeIfPresent(rationale, forKey: .rationale)
+    try container.encodeIfPresent(exampleScript, forKey: .exampleScript)
+    try container.encodeIfPresent(command, forKey: .command)
+    try container.encodeIfPresent(cwd, forKey: .cwd)
+    try container.encodeIfPresent(env, forKey: .env)
+    try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
+  }
+
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     mode = try container.decodeIfPresent(String.self, forKey: .mode)
@@ -313,7 +391,26 @@ public struct AgentRequestParams: Codable, Equatable, Sendable {
     quality = try container.decodeIfPresent(Int.self, forKey: .quality)
     appName = try container.decodeIfPresent(String.self, forKey: .appName)
     rect = try container.decodeIfPresent(CaptureRect.self, forKey: .rect)
-    path = try container.decodeIfPresent(String.self, forKey: .path)
+    if container.contains(.path), try !container.decodeNil(forKey: .path) {
+      if let filePath = try? container.decode(String.self, forKey: .path) {
+        path = filePath
+        menuPath = nil
+      } else if let decodedMenuPath = try? container.decode([String].self, forKey: .path) {
+        path = nil
+        menuPath = decodedMenuPath
+      } else {
+        throw DecodingError.typeMismatch(
+          String.self,
+          .init(
+            codingPath: container.codingPath + [CodingKeys.path],
+            debugDescription: "path must be a string file path or an array of menu title strings"
+          )
+        )
+      }
+    } else {
+      path = nil
+      menuPath = nil
+    }
     recursive = try container.decodeIfPresent(Bool.self, forKey: .recursive)
     glob = try container.decodeIfPresent(String.self, forKey: .glob)
     includeHidden = try container.decodeIfPresent(Bool.self, forKey: .includeHidden)

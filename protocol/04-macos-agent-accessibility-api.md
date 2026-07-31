@@ -26,7 +26,7 @@ All actions run inside the logged-in GUI session by the macOS agent app, which a
 Every `ax.*` action requires **Accessibility** permission (`AXIsProcessTrusted()`).
 
 - Not granted → error envelope `permission_denied` (`"Accessibility permission is not granted"`).
-- Granted → `agent.status` `capabilities` includes the twelve `ax.*` actions.
+- Granted → `agent.status` `capabilities` includes the fifteen `ax.*` actions.
 - Keyboard/mouse event synthesis (`ax.type-text`, `ax.key-press`, `ax.click-at`) is covered by the same Accessibility trust — no extra TCC prompt.
 
 Check `permissions.status` (or `agent.status → permissions.accessibility`) before calling.
@@ -36,8 +36,8 @@ Check `permissions.status` (or `agent.status → permissions.accessibility`) bef
 Accessibility trust is necessary but not sufficient for `ax.*` access. The agent resolves a target app before dispatching each request: `targetPid` first, then query `pid`, then `appName`; untargeted synthetic input resolves the current frontmost app and dispatches to that captured PID. This prevents focus changes from redirecting typed keys or clicks after approval.
 
 - **Default deny:** there is no stored Deny rule. A missing rule has no access until the local user grants it manually or from a popup.
-- **Read actions** (`ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.get-value`) require a validated application bundle ID and **Observe** or **Control** access.
-- **Write actions** (`ax.perform`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, `ax.scroll`, `ax.drag`) require that same target plus **Control**. Control also permits all reads.
+- **Read actions** (`ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.menu-list`, `ax.get-value`) require a validated application bundle ID and **Observe** or **Control** access.
+- **Write actions** (`ax.perform`, `ax.menu-click`, `ax.menu-navigate`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, `ax.scroll`, `ax.drag`) require that same target plus **Control**. Control also permits all reads.
 - `ax.list-apps` requires **Observe** for the global **Application Discovery** category; it is not a default process-list exemption.
 - An unresolved app target fails closed with `app_permission_required`, `pending: false`; it never opens a prompt or creates a pending request.
 - Popups request the exact level: Allow Once, Always Allow Observe/Control, or Not Now. Timeouts queue a validated target/intent in the menu bar; Not Now and Dismiss persist no negative rule.
@@ -52,8 +52,8 @@ There are **no persistent element handles**. AXUIElement references are not stab
 
 | Param | Type | Applies to | Meaning |
 | --- | --- | --- | --- |
-| `appName` | string | all query actions | App name or bundle id. Exact match first, then case-insensitive "contains". |
-| `pid` | number | all query actions | Target app by process id (wins over `appName`). One of `appName`/`pid` is required. |
+| `appName` | string | all query actions | App name or bundle id. Exact match first, then case-insensitive "contains". Required with `pid` for ordinary query actions; optional for high-level menu actions, which default to the frontmost app. |
+| `pid` | number | all query actions | Target app by process id (wins over `appName`). One of `appName`/`pid` is required except for `ax.menu-click`, `ax.menu-navigate`, and `ax.menu-list`. |
 | `windowTitle` | string | all query actions | Window title (case-insensitive contains). Default: the app's main window. |
 | `windowIndex` | number | all query actions | Window index from `ax.list-windows` (overrides default main window). |
 | `allWindows` | bool | `ax.get-tree`, `ax.find`, element lookup | Search every window of the app instead of one window. |
@@ -72,6 +72,7 @@ Rules:
 
 - Every provided criterion must match (AND semantics).
 - `ax.find`, `ax.perform`, `ax.get-value`, `ax.set-value` require **at least one** of `role`, `title`, `label`, `identifier`, `valueContains` → otherwise `invalid_request`.
+- `ax.menu-click`, `ax.menu-navigate`, and `ax.menu-list` capture the frontmost app when both `appName` and `pid` are omitted. The captured app identity is authorized before menu access runs.
 - App lookup misses → `app_not_found`. Element lookup misses → `element_not_found`.
 - Menu bar items (`AXMenuBarItem`, `AXMenuItem`) are **not** under windows — always pass `scope: "menubar"` (or `"all"`) to find/press them.
 
@@ -87,7 +88,7 @@ All requests use the standard frame:
 
 Responses are standard envelopes (`ok`, `data`). No action returns a binary body.
 
-Twelve actions: `ax.list-apps`, `ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.perform`, `ax.get-value`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, `ax.scroll`, and `ax.drag`.
+Fifteen actions: `ax.list-apps`, `ax.list-windows`, `ax.get-tree`, `ax.find`, `ax.perform`, `ax.menu-click`, `ax.menu-navigate`, `ax.menu-list`, `ax.get-value`, `ax.set-value`, `ax.type-text`, `ax.key-press`, `ax.click-at`, `ax.scroll`, and `ax.drag`.
 
 ### `ax.list-apps` — list running GUI apps
 
@@ -206,6 +207,78 @@ Params: targeting + criteria + `action` (default `"press"`) + optional `index`.
 Response `data`: `{ "action": "press", "element": { ...matched element snapshot... } }`.
 Failure (unsupported action, stale element, hung app) → `action_failed`.
 
+### `ax.menu-list` — list top-level menu bar items
+
+Params: `appName` (optional; defaults to the frontmost app). Requires **Observe** access.
+
+```json
+{ "action": "ax.menu-list", "params": { "appName": "Safari" } }
+```
+
+```json
+{
+  "ok": true,
+  "data": {
+    "appName": "Safari",
+    "items": [
+      { "title": "Safari", "enabled": true },
+      { "title": "File", "enabled": true },
+      { "title": "Edit", "enabled": true },
+      { "title": "View", "enabled": true }
+    ]
+  }
+}
+```
+
+Only direct, visible `AXMenuBarItem` children are returned, in menu-bar order. Apps without an accessible menu bar return `element_not_found` with the app name.
+
+### `ax.menu-click` — click a top-level menu bar item
+
+Params: `title` (required), `appName` (optional; defaults to the frontmost app). Requires **Control** access.
+
+```json
+{ "action": "ax.menu-click", "params": { "appName": "TextEdit", "title": "File" } }
+```
+
+The agent finds an immediate `AXMenuBarItem` by title (case-insensitive exact match first, then contains match), rejects disabled items, and performs `AXPress`.
+
+Response `data` includes the resolved app, requested path, and final item snapshot:
+
+```json
+{
+  "action": "ax.menu-click",
+  "appName": "TextEdit",
+  "path": ["File"],
+  "item": { "role": "AXMenuBarItem", "title": "File", "enabled": true }
+}
+```
+
+A missing title returns `invalid_request`; a missing item returns `element_not_found` (for example, `Menu bar item 'File' not found in TextEdit`); a disabled or non-pressable item returns `action_failed`.
+
+### `ax.menu-navigate` — open a hierarchical menu path and select its final item
+
+Params: `path` (required non-empty array of strings), `appName` (optional; defaults to the frontmost app). Requires **Control** access.
+
+```json
+{ "action": "ax.menu-navigate", "params": { "appName": "TextEdit", "path": ["File", "New"] } }
+```
+
+The first path segment is resolved from the app's `AXMenuBar` and opened with `AXShowMenu`. Each non-final segment is resolved from the currently open `AXMenu`, opened with `AXShowMenu`, and followed by a 150 ms wait before the new submenu is queried. The final `AXMenuItem` is pressed with `AXPress`.
+
+- A one-item path presses that top-level menu bar item (equivalent to `ax.menu-click`).
+- Matching is case-insensitive, preferring exact immediate-child title matches before contains matches.
+- Every resolved segment must be enabled. Missing segments identify both the segment and app; disabled segments return `action_failed`.
+- The `path` key is intentionally an array only for this action. File actions continue to use the same key as a string filesystem path; any other JSON type is rejected as `invalid_request`.
+
+```json
+{
+  "action": "ax.menu-navigate",
+  "appName": "TextEdit",
+  "path": ["File", "New"],
+  "item": { "role": "AXMenuItem", "title": "New", "enabled": true }
+}
+```
+
 ### `ax.get-value` / `ax.set-value` — read & write element values
 
 `ax.get-value` returns the matched element snapshot (value inside `element.value`).
@@ -271,11 +344,11 @@ Params: `deltaX` / `deltaY` (numbers; at least one non-zero, 1 unit ≈ one whee
 | Code | When |
 | --- | --- |
 | `permission_denied` | Accessibility permission missing |
-| `invalid_request` | Missing app target, missing criteria, missing `value`/`text`/`key`/`x`/`y` |
+| `invalid_request` | Missing app target, missing criteria, missing `value`/`text`/`key`/`x`/`y`, empty menu title/path, or a `path` with an unsupported JSON type |
 | `unsupported_parameter` | Unknown key, modifier, mouse button, or perform action |
-| `app_not_found` | No running GUI app matches `appName`/`pid` |
-| `element_not_found` | No window/element matches the query |
-| `action_failed` | AX action rejected by the target app (includes the AX error reason) |
+| `app_not_found` | No running GUI app matches `appName`/`pid`, and no frontmost app is available for a high-level menu action |
+| `element_not_found` | No window/element matches the query, an app has no menu bar, or a requested menu path segment is absent |
+| `action_failed` | AX action rejected by the target app (includes the AX error reason), including a disabled menu item |
 
 ---
 
@@ -295,8 +368,7 @@ Params: `deltaX` / `deltaY` (numbers; at least one non-zero, 1 unit ≈ one whee
 4. **Web content nests deep.** Google's results text sits ~25 levels down. The find/act default depth is 30 — only override `depth` when you need more.
 5. **Chromium/Electron web trees are auto-enabled.** The agent sets `AXEnhancedUserInterface` + `AXManualAccessibility` on every app it touches, which makes Chrome/VS Code/Slack expose their full `AXWebArea` tree. The tree can take ~1 s to materialize after the first call — if a first `ax.find` on a browser returns nothing, wait a second and retry.
 6. **Verify after acting.** AX calls report what was requested, not what visually happened. Confirm outcomes with `ax.list-windows` (title changed?), `ax.get-value`, or `screenshot.capture`.
-7. **Menu bar commands need `scope: "menubar"`** — e.g. File → New Tab:
-   `{ "action": "ax.perform", "params": { "appName": "Chrome", "scope": "menubar", "role": "AXMenuItem", "title": "New Tab" } }`.
+7. **Prefer high-level menu actions for menu commands.** Use `ax.menu-list` to discover top-level menus, `ax.menu-click` for one top-level item, and `ax.menu-navigate` for paths such as `{ "action": "ax.menu-navigate", "params": { "appName": "Chrome", "path": ["File", "New Tab"] } }`. The low-level fallback still needs `scope: "menubar"`.
 
 ---
 
@@ -313,6 +385,9 @@ Suggested tool surface (names up to Brain):
 | `macos_ax_get_tree` | `ax.get-tree` | `appName`, `windowTitle?`, `depth?`, `maxElements?`, `allWindows?` |
 | `macos_ax_find` | `ax.find` | `appName`, `role?`, `title?`, `label?`, `identifier?`, `valueContains?`, `scope?`, `depth?`, `maxResults?` |
 | `macos_ax_perform` | `ax.perform` | `appName`, criteria, `action`, `index?`, `scope?` |
+| `macos_ax_menu_list` | `ax.menu-list` | `appName?` (frontmost default) |
+| `macos_ax_menu_click` | `ax.menu-click` | `title`, `appName?` (frontmost default) |
+| `macos_ax_menu_navigate` | `ax.menu-navigate` | `path` (string array), `appName?` (frontmost default) |
 | `macos_ax_get_value` | `ax.get-value` | `appName`, criteria |
 | `macos_ax_set_value` | `ax.set-value` | `appName`, criteria, `value` |
 | `macos_ax_type_text` | `ax.type-text` | `text` |

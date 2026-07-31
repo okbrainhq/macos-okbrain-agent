@@ -17,7 +17,7 @@
 | **Compact tree mode** | `ax.get-tree` | `compact` |
 | **Drag action** (new) | `ax.drag` | `x`, `y`, `toX`, `toY`, `targetPid?` |
 
-The capability list now has **twelve** `ax.*` actions (was eleven): `ax.drag` is added.
+This addendum introduced `ax.drag` as the twelfth action (from eleven at the time). The current capability list has **fifteen** `ax.*` actions after the later high-level menu additions; see doc 04 for the complete current surface.
 
 ---
 

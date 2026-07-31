@@ -50,6 +50,9 @@ public final class AgentRequestHandler: @unchecked Sendable {
     "ax.get-tree",
     "ax.find",
     "ax.perform",
+    "ax.menu-click",
+    "ax.menu-navigate",
+    "ax.menu-list",
     "ax.get-value",
     "ax.set-value",
     "ax.type-text",
@@ -61,12 +64,22 @@ public final class AgentRequestHandler: @unchecked Sendable {
 
   private let accessibilityWriteActions: Set<String> = [
     "ax.perform",
+    "ax.menu-click",
+    "ax.menu-navigate",
     "ax.set-value",
     "ax.type-text",
     "ax.key-press",
     "ax.click-at",
     "ax.scroll",
     "ax.drag"
+  ]
+
+  /// These high-level menu APIs intentionally support an omitted appName by
+  /// capturing the frontmost app before permission authorization.
+  private let accessibilityFrontmostFallbackActions: Set<String> = [
+    "ax.menu-click",
+    "ax.menu-navigate",
+    "ax.menu-list"
   ]
 
   private let functionActions: Set<String> = [
@@ -277,6 +290,32 @@ public final class AgentRequestHandler: @unchecked Sendable {
         id: id,
         data: accessibility.perform(query: axQuery(params, defaultDepth: 30, resolvedTarget: targetResolution), action: params.action ?? "press")
       )
+    case "ax.menu-click":
+      guard let title = params.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+        throw AgentProtocolError.invalidRequest("title is required for ax.menu-click")
+      }
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(
+        protocolName: protocolName,
+        id: id,
+        data: accessibility.menuClick(query: query, title: title)
+      )
+    case "ax.menu-navigate":
+      guard let path = params.menuPath, !path.isEmpty else {
+        throw AgentProtocolError.invalidRequest("path must be a non-empty array of menu titles for ax.menu-navigate")
+      }
+      if let emptyIndex = path.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+        throw AgentProtocolError.invalidRequest("path[\(emptyIndex)] must be a non-empty menu title for ax.menu-navigate")
+      }
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(
+        protocolName: protocolName,
+        id: id,
+        data: accessibility.menuNavigate(query: query, path: path)
+      )
+    case "ax.menu-list":
+      try ensureDispatchAuthorized()
+      return try encodeSuccess(protocolName: protocolName, id: id, data: accessibility.menuListItems(query: query))
     case "ax.get-value":
       try ensureDispatchAuthorized()
       return try encodeSuccess(protocolName: protocolName, id: id, data: accessibility.value(query: axQuery(params, defaultDepth: 30, resolvedTarget: targetResolution)))
@@ -353,7 +392,8 @@ public final class AgentRequestHandler: @unchecked Sendable {
     }
 
     let isWrite = accessibilityWriteActions.contains(action)
-    let resolved = try axTargetResolver.resolve(params: params, useFrontmostFallback: isWrite)
+    let useFrontmostFallback = isWrite || accessibilityFrontmostFallbackActions.contains(action)
+    let resolved = try axTargetResolver.resolve(params: params, useFrontmostFallback: useFrontmostFallback)
     guard resolved.wasResolved, resolved.target.isValidated else {
       throw unresolvedAccessibilityTargetError(action: action, intent: isWrite ? .control : .observe)
     }
@@ -664,6 +704,9 @@ public final class AgentRequestHandler: @unchecked Sendable {
         "ax.get-tree",
         "ax.find",
         "ax.perform",
+        "ax.menu-click",
+        "ax.menu-navigate",
+        "ax.menu-list",
         "ax.get-value",
         "ax.set-value",
         "ax.type-text",
